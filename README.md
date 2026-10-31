@@ -67,6 +67,16 @@
 > 安装或更新扩展后，已经打开的直播间需要刷新一次；侧边栏也需要关闭重开。
 > 想长时间挂机时可以点右上角 `⤢` 在独立标签页打开本页面，但请只保留一个助手页面处理自动回复。
 
+### 用 DeepSeek Harness 一键准备
+
+把仓库链接丢给 DSH，让它读 [`AGENTS.md`](AGENTS.md)，它会检查 Node、后台启动桥接、打开扩展管理页 / 背景板 / 直播间：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/quick-start.ps1 -Room "https://live.douyin.com/你的房间号"
+```
+
+加 `-CheckOnly` 只做环境体检、不启动任何服务。脚本无法替你点「加载已解压的扩展程序」——这一步浏览器不允许自动化，手动选一次 `extension` 目录即可；之后每场开播只要重跑上面的命令。
+
 ---
 
 ## 快速上手

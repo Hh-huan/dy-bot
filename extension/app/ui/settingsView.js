@@ -35,12 +35,6 @@ const ids = {
   ttsVoice: '#setTtsVoice',
   ttsVoiceCustom: '#setTtsVoiceCustom',
   ttsKey: '#setTtsKey',
-  voiceChangerEnabled: '#setVoiceChangerEnabled',
-  voiceChangerInput: '#setVoiceChangerInput',
-  voiceChangerOutput: '#setVoiceChangerOutput',
-  voiceChangerReference: '#setVoiceChangerReference',
-  voiceChangerSteps: '#setVoiceChangerSteps',
-  voiceChangerBlock: '#setVoiceChangerBlock',
   warmupEnabled: '#setWarmupEnabled',
   warmupIdle: '#setWarmupIdle',
   warmupInterval: '#setWarmupInterval',
@@ -158,207 +152,6 @@ export function initSettingsView(ctx) {
     }
   }
 
-  let vcDevicesLoaded = false;
-  let vcPollTimer = null;
-
-  function setVcStatus(text, kind = '') {
-    const el = $('#voiceChangerStatus');
-    if (!el) return;
-    el.textContent = text;
-    el.className = `status-line ${kind}`;
-  }
-
-  function vcDeviceIndex(select) {
-    const value = select && select.value;
-    if (value === '' || value == null) return null;
-    const index = Number(value);
-    return Number.isInteger(index) ? index : null;
-  }
-
-  function vcDeviceName(select) {
-    const option = select && select.selectedOptions && select.selectedOptions[0];
-    return option ? (option.dataset.name || option.textContent || '') : '';
-  }
-
-  function fillVcSelect(select, devices, savedIndex, savedName, fallbackIndex, preferVirtual) {
-    if (!select) return null;
-    select.innerHTML = '';
-    if (!devices.length) {
-      select.append(new Option('未找到设备', ''));
-      return null;
-    }
-    for (const device of devices) {
-      const flags = [
-        device.default ? '默认' : '',
-        device.virtual ? '虚拟声卡' : '',
-        device.hostapi || '',
-      ].filter(Boolean);
-      const option = new Option(
-        `${device.name}${flags.length ? `（${flags.join(' · ')}）` : ''}`,
-        String(device.index),
-      );
-      option.dataset.name = device.name;
-      select.append(option);
-    }
-    let chosen = null;
-    if (Number.isInteger(savedIndex) && devices.some((d) => d.index === savedIndex)) {
-      chosen = savedIndex;
-    } else if (savedName && devices.some((d) => d.name === savedName)) {
-      chosen = devices.find((d) => d.name === savedName).index;
-    } else if (preferVirtual && devices.some((d) => d.index === fallbackIndex && d.virtual)) {
-      chosen = fallbackIndex;
-    } else if (preferVirtual && devices.some((d) => d.virtual)) {
-      chosen = devices.find((d) => d.virtual).index;
-    } else if (devices.some((d) => d.index === fallbackIndex)) {
-      chosen = fallbackIndex;
-    } else {
-      chosen = devices[0].index;
-    }
-    select.value = String(chosen);
-    return chosen;
-  }
-
-  async function vcRequest(pathname, method = 'GET', body = null, timeout = 60000) {
-    let response;
-    try {
-      response = await fetch(`http://127.0.0.1:8787/api/vc${pathname}`, {
-        method,
-        headers: body ? { 'Content-Type': 'application/json' } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(timeout),
-      });
-    } catch (error) {
-      throw new Error(`无法连接本地桥接（8787）：${error.message}`);
-    }
-    const text = await response.text();
-    let data = {};
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      data = { ok: false, error: text };
-    }
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    return data;
-  }
-
-  async function refreshVcDevices({ silent = false } = {}) {
-    if (!silent) setVcStatus('正在读取音频设备…');
-    try {
-      const data = await vcRequest('/devices', 'GET', null, 60000);
-      const inputs = Array.isArray(data.inputs) ? data.inputs : [];
-      const outputs = Array.isArray(data.outputs) ? data.outputs : [];
-      const vc = ctx.getSettings().voiceChanger || {};
-      const defaults = data.default || {};
-      const cable = data.virtualCable || {};
-      const inputIndex = fillVcSelect(
-        node('voiceChangerInput'), inputs, vc.inputDevice, vc.inputName,
-        defaults.input, false,
-      );
-      const outputIndex = fillVcSelect(
-        node('voiceChangerOutput'), outputs, vc.outputDevice, vc.outputName,
-        defaults.output, cable.installed,
-      );
-      vcDevicesLoaded = true;
-      const next = {
-        ...vc,
-        inputDevice: inputIndex,
-        inputName: vcDeviceName(node('voiceChangerInput')),
-        outputDevice: outputIndex,
-        outputName: vcDeviceName(node('voiceChangerOutput')),
-      };
-      await ctx.applySettings({ voiceChanger: next });
-      if (!cable.installed) {
-        setVcStatus('设备已读取 · 未检测到 VB-Cable，只能先输出到扬声器', 'warn');
-      } else if (outputIndex === cable.outputIndex) {
-        setVcStatus('设备已读取 · 输出已选 CABLE Input（虚拟声卡）', 'ok');
-      } else {
-        setVcStatus('设备已读取 · 当前输出不是虚拟声卡，其他软件收不到变声', 'warn');
-      }
-    } catch (error) {
-      setVcStatus(`读取失败：${error.message}`, 'error');
-    }
-  }
-
-  function stopVcPolling() {
-    if (vcPollTimer) {
-      clearInterval(vcPollTimer);
-      vcPollTimer = null;
-    }
-  }
-
-  function vcStatusText(payload) {
-    const state = payload.state || 'idle';
-    if (state === 'running') {
-      const stats = payload.stats || {};
-      const gated = stats.gated ? ' · 静音跳过' : '';
-      return {
-        text: `运行中 · 推理 ${stats.totalMs ?? '—'}ms · 算法延迟约 ${stats.latencyMs ?? '—'}ms${gated}`,
-        kind: 'ok',
-      };
-    }
-    if (state === 'loading') return { text: payload.message || '正在加载模型…', kind: '' };
-    if (state === 'error') {
-      const message = String(payload.message || payload.error || '未知错误').split('\n')[0];
-      return { text: `失败：${message}`, kind: 'error' };
-    }
-    return { text: payload.message || '已停止', kind: '' };
-  }
-
-  async function pollVcStatus() {
-    try {
-      const data = await vcRequest('/status', 'GET', null, 8000);
-      const { text, kind } = vcStatusText(data);
-      setVcStatus(text, kind);
-      if (data.state === 'error' || data.state === 'idle') stopVcPolling();
-    } catch (error) {
-      stopVcPolling();
-      setVcStatus(`变声服务未响应：${error.message}`, 'error');
-    }
-  }
-
-  function startVcPolling() {
-    stopVcPolling();
-    vcPollTimer = setInterval(pollVcStatus, 1800);
-    pollVcStatus();
-  }
-
-  async function startVoiceChanger() {
-    let vc = collect().voiceChanger;
-    if (vc.inputDevice == null || vc.outputDevice == null) {
-      await refreshVcDevices({ silent: true });
-      vc = collect().voiceChanger;
-    }
-    if (vc.inputDevice == null || vc.outputDevice == null) {
-      setVcStatus('请先点击「刷新设备」选择麦克风与输出设备', 'error');
-      return;
-    }
-    setVcStatus('正在加载模型…首次启动会下载约 1–2GB 模型');
-    try {
-      node('voiceChangerEnabled').checked = true;
-      await ctx.applySettings({ voiceChanger: { ...vc, enabled: true } });
-      await vcRequest('/start', 'POST', vc, 30000);
-      startVcPolling();
-    } catch (error) {
-      node('voiceChangerEnabled').checked = false;
-      await ctx.applySettings({ voiceChanger: { ...vc, enabled: false } });
-      setVcStatus(`启动失败：${error.message}`, 'error');
-    }
-  }
-
-  async function stopVoiceChanger() {
-    stopVcPolling();
-    node('voiceChangerEnabled').checked = false;
-    const vc = collect().voiceChanger;
-    await ctx.applySettings({ voiceChanger: { ...vc, enabled: false } });
-    setVcStatus('正在停止…');
-    try {
-      await vcRequest('/stop', 'POST', {}, 15000);
-      setVcStatus('已停止');
-    } catch (error) {
-      setVcStatus(`停止失败：${error.message}`, 'error');
-    }
-  }
-
   function boardBaseUrl() {
     const settings = ctx.getSettings();
     return String((settings.board && settings.board.bridgeUrl) || 'http://127.0.0.1:8787').replace(/\/+$/, '');
@@ -435,26 +228,6 @@ export function initSettingsView(ctx) {
     node('ttsKey').value = tts.apiKey || '';
     syncTtsVoiceField();
 
-    const vc = settings.voiceChanger || {};
-    node('voiceChangerEnabled').checked = Boolean(vc.enabled);
-    node('voiceChangerReference').value = vc.referencePath || 'reference/pet-voice.wav';
-    node('voiceChangerSteps').value = String(vc.diffusionSteps ?? 8);
-    node('voiceChangerBlock').value = String(vc.blockTime ?? 0.3);
-    if (!vcDevicesLoaded) {
-      for (const [key, label, savedIndex, savedName] of [
-        ['voiceChangerInput', '麦克风', vc.inputDevice, vc.inputName],
-        ['voiceChangerOutput', '输出设备', vc.outputDevice, vc.outputName],
-      ]) {
-        const select = node(key);
-        if (select.options.length) continue;
-        select.innerHTML = '';
-        select.append(new Option(
-          savedName ? `${savedName}（已保存）` : `点击「刷新设备」加载${label}`,
-          Number.isInteger(savedIndex) ? String(savedIndex) : '',
-        ));
-      }
-    }
-
     const warmup = settings.warmup || {};
     node('warmupEnabled').checked = Boolean(warmup.enabled);
     node('warmupIdle').value = String(warmup.idleSec ?? 120);
@@ -527,20 +300,6 @@ export function initSettingsView(ctx) {
             ? node('ttsVoiceCustom').value.trim() || DEFAULT_TTS_VOICE
             : node('ttsVoice').value,
         apiKey: node('ttsKey').value.trim(),
-      },
-      voiceChanger: {
-        ...(previous.voiceChanger || {}),
-        enabled: node('voiceChangerEnabled').checked,
-        inputDevice: vcDeviceIndex(node('voiceChangerInput')),
-        inputName: vcDeviceName(node('voiceChangerInput')),
-        outputDevice: vcDeviceIndex(node('voiceChangerOutput')),
-        outputName: vcDeviceName(node('voiceChangerOutput')),
-        referencePath:
-          node('voiceChangerReference').value.trim() || 'reference/pet-voice.wav',
-        diffusionSteps: Math.round(clamp(
-          Number(node('voiceChangerSteps').value) || 8, 4, 25,
-        )),
-        blockTime: clamp(Number(node('voiceChangerBlock').value) || 0.3, 0.15, 0.5),
       },
       warmup: {
         ...previous.warmup,
@@ -787,14 +546,6 @@ export function initSettingsView(ctx) {
       status.textContent = `失败：${error.message}`;
       status.className = 'status-line error';
     }
-  });
-
-  $('#refreshVoiceChangerBtn').addEventListener('click', () => refreshVcDevices());
-  $('#startVoiceChangerBtn').addEventListener('click', () => startVoiceChanger());
-  $('#stopVoiceChangerBtn').addEventListener('click', () => stopVoiceChanger());
-  node('voiceChangerEnabled').addEventListener('change', () => {
-    if (node('voiceChangerEnabled').checked) startVoiceChanger();
-    else stopVoiceChanger();
   });
 
   $('#testDshPetBtn').addEventListener('click', async () => {

@@ -46,7 +46,6 @@
 | 直播背景板 | OBS 浏览器源 16:9 画面，实时显示弹幕流水席、AI 回复、在线人数和点歌队列；中间预留桌宠站位；底部显示白饭统计和 API 额度 |
 | 弹幕点歌 | 观众发「点歌 歌名」；调用 QQ 音乐客户端播放，网易云 / 酷狗适配；每首至少播 60 秒，小心心可插队 |
 | 桌宠联动 | 直接接 DSH 里的 dsh-pet（气泡/动作/右键菜单/TTS）；也支持本地桥接给其他桌宠 |
-| 实时变声 | 可选，Seed-VC + CUDA 把麦克风实时变成桌宠音色，经 VB-Cable 路由进直播软件 |
 | 事件转发 | 可选，把弹幕 / 回复以 JSON POST 到 Webhook，便于二次开发 |
 | 记录与导出 | 发送成功、队列丢弃与错误记录；弹幕导出 CSV；配置导入导出（不含 API Key） |
 | 单实例锁 | 侧边栏和独立标签页同时打开时，只有一个实例会真正发送，避免重复回复 |
@@ -396,35 +395,6 @@ npm run bridge
 
 ---
 
-## 实时变声（可选）
-
-`voice-changer/` 是一套本地实时变声服务：用 Seed-VC 零样本克隆音色，把麦克风声音实时变成桌宠音色，再通过虚拟声卡（VB-Cable）送进直播软件。
-
-- 需要 **NVIDIA GPU（CUDA）** 和 **Python 3.11**；不支持 CPU 回退。
-- 桥接通过 `POST /api/voice-changer` 控制，服务默认监听 `http://127.0.0.1:8790`。
-- 先在系统安装 **VB-Cable**，把输出设备设为 `CABLE Input`，直播软件麦克风设为 `CABLE Output`。
-
-首次安装（会创建 `.venv` 并下载模型，体积较大）：
-
-```powershell
-cd voice-changer
-.\setup.ps1
-```
-
-启动（隐藏窗口，自动打开控制面板）：
-
-```powershell
-.\launch.ps1
-```
-
-也可以直接 `.\start.ps1` 前台运行。控制面板：`http://127.0.0.1:8790/panel`。
-
-- `config.json` 首次启动自动生成；输入 / 输出设备可在面板里选择。
-- 参考音色默认是 `reference/pet-voice.wav`（不入库）。可用 `node scripts/make_reference.mjs` 用 MiniMax TTS 生成自己的参考音频（需要 `private/ai-config.json` 里的 Key，自行准备）。
-- 旧版 `config.json` 里的本机路径 / 设备编号与个人音色文件不会包含在仓库中。
-
----
-
 ## 桌宠联动
 
 ### 方式一：直接接 DSH 里的 dsh-pet（当前已安装，推荐）
@@ -674,21 +644,15 @@ AI 回复（桌宠收到后应朗读/气泡）：
 │  │  └─ ui/                  # 规则编辑器、设置页、DOM 辅助
 │  └─ icons/
 ├─ bridge/
-│  ├─ server.mjs              # 桥接 / 背景板 / 点歌 / 变声 API（SSE + HTTP，零依赖）
+│  ├─ server.mjs              # 桥接 / 背景板 / 点歌 API（SSE + HTTP，零依赖）
 │  ├─ song.mjs                # 点歌队列 + QQ / 网易云 / 酷狗适配
 │  ├─ memory.mjs              # 单场 / 跨场观众记忆
 │  ├─ userLedger.mjs          # 访问行为哈希链台账
 │  ├─ violationStore.mjs      # 敏感曲目黑名单
 │  ├─ control.mjs             # 桥接进程守护
-│  ├─ voiceChanger.mjs        # 实时变声服务代理
 │  └─ media-keys.ps1          # 暂停 / 下一首的 Windows 媒体键
 ├─ test/                      # Node 单元测试（无第三方依赖）
 ├─ tools/                     # 启动、开机自启、打开背景板等 Windows 脚本
-├─ voice-changer/             # 实时变声（Seed-VC + VB-Cable，可选）
-│  ├─ engine.py               # 流式推理与 SOLA 拼接
-│  ├─ server.py               # HTTP 控制 + 音频设备路由
-│  ├─ setup.ps1 / launch.ps1  # 环境安装 / 一键启动
-│  └─ scripts/make_reference.mjs
 └─ examples/
    ├─ webhook-receiver.mjs    # 示例 Webhook 服务
    ├─ board/                  # 直播背景板（OBS 浏览器源）
@@ -820,9 +784,7 @@ python tools/make-icons.py extension/icons
 
 ## 第三方组件与许可
 
-- 仓库根目录采用 **MIT License**（见 `LICENSE`）。
-- `voice-changer/` 单独采用 **GPL-3.0**（见 `voice-changer/LICENSE`）：其流式缓冲与 SOLA 拼接逻辑参考 **Seed-VC**（`Plachtaa/seed-vc`，GPL-3.0）的 `real-time-gui.py`，属于衍生代码，分发时须遵守 GPL-3.0；不需要变声功能时可直接删除该目录，其余代码仍按 MIT 使用。
-- Seed-VC / CosyVoice / campplus 等模型权重由 `setup.ps1` 首次运行时从上游下载，仓库**不包含权重**，使用须遵守各自模型许可（以上游仓库为准）。
+- 仓库采用 **MIT License**（见 `LICENSE`）。
 - 点歌使用 QQ 音乐 / 网易云 / 酷狗的非官方接口，仅供本机个人试听；抖音弹幕为页面旁路只读实现，同样非官方接口，可能随平台改版失效。
 - `examples/board/pet-cd-label.jpg` 是项目角色素材，README 截图中的专辑封面（《晴天》）版权归原权利方；公开再分发前请确认授权，或替换为自制素材。
 - README 中的背景板截图均为演示数据，不含真实观众信息。

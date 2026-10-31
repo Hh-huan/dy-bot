@@ -370,52 +370,6 @@
             </div>
 
             <div class="settings-group">
-              <h2>实时变声 <span class="tag">Seed-VC</span></h2>
-              <p class="muted">
-                麦克风声音实时转成桌宠音色，再输出到虚拟声卡。直播软件或游戏把麦克风选为
-                「CABLE Output」后，观众听到的就是变声后的声音。首次启动会自动下载模型。
-              </p>
-              <label class="check-row slim">
-                <input type="checkbox" id="setVoiceChangerEnabled" />
-                <span>启用实时变声</span>
-              </label>
-              <div class="field-row">
-                <label class="field">
-                  <span>麦克风</span>
-                  <select id="setVoiceChangerInput"></select>
-                </label>
-                <label class="field">
-                  <span>输出设备</span>
-                  <select id="setVoiceChangerOutput"></select>
-                </label>
-              </div>
-              <label class="field">
-                <span>参考音色</span>
-                <input type="text" id="setVoiceChangerReference" placeholder="reference/pet-voice.wav" />
-              </label>
-              <div class="field-row">
-                <label class="field">
-                  <span>扩散步数</span>
-                  <input type="number" id="setVoiceChangerSteps" min="4" max="25" step="1" />
-                </label>
-                <label class="field">
-                  <span>块时长（秒）</span>
-                  <input type="number" id="setVoiceChangerBlock" min="0.15" max="0.5" step="0.01" />
-                </label>
-              </div>
-              <div class="button-row">
-                <button type="button" class="ghost-btn" id="refreshVoiceChangerBtn">刷新设备</button>
-                <button type="button" class="ghost-btn" id="startVoiceChangerBtn">启动变声</button>
-                <button type="button" class="ghost-btn" id="stopVoiceChangerBtn">停止</button>
-                <span id="voiceChangerStatus" class="status-line"></span>
-              </div>
-              <p class="muted small-note">
-                未检测到 VB-Cable 时只能输出到扬声器；要让其他软件接收变声后的麦克风，请先安装
-                VB-Cable，再把输出设备选为「CABLE Input」。
-              </p>
-            </div>
-
-            <div class="settings-group">
               <h2>暖场发言 <span class="tag">自动</span></h2>
               <p class="muted">
                 直播间安静或人少时，让 AI 说一句暖场话：可以发到直播间公屏、显示在桌宠气泡，并用 MiniMax 语音念出来。

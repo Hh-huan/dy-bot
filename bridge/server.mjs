@@ -18,7 +18,6 @@ import { fileURLToPath } from 'node:url';
 import { createSongManager } from './song.mjs';
 import { createMemoryStore } from './memory.mjs';
 import { createUserLedger } from './userLedger.mjs';
-import { createVoiceChanger } from './voiceChanger.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PET_DIR = path.resolve(HERE, '../examples/pet');
@@ -26,7 +25,6 @@ const BOARD_DIR = path.resolve(HERE, '../examples/board');
 const memory = createMemoryStore({ file: path.resolve(HERE, 'memory.json') });
 // 观众行为留证台账：append-only 哈希链，用户否认访问时可调取时间线证据
 const userLedger = createUserLedger({ file: path.resolve(HERE, 'user-ledger.jsonl') });
-const voiceChanger = createVoiceChanger();
 // 插件「运行记录」实时落盘，便于排查线上问题（扩展侧只存在内存里，刷新即清）
 const APP_LOG_FILE = path.resolve(HERE, 'app.log');
 const APP_LOG_MAX = 5 * 1024 * 1024;
@@ -359,8 +357,7 @@ export function createBridgeServer(options = {}) {
         /* ignore */
       }
       json(res, 200, { ok: true, stopping: true });
-      setTimeout(async () => {
-        try { await voiceChanger.shutdown(); } catch { /* ignore */ }
+      setTimeout(() => {
         try { server.close(); } catch { /* ignore */ }
         process.exit(0);
       }, 120);
@@ -442,27 +439,6 @@ export function createBridgeServer(options = {}) {
         id: payload.id,
         hint: commandClients.size ? '' : '直播助手未连接：请打开扩展侧边栏并启用桌宠联动',
       });
-      return;
-    }
-
-    if (pathname.startsWith('/api/vc/')) {
-      let body = {};
-      if (req.method === 'POST') {
-        try {
-          body = await readJson(req);
-        } catch (error) {
-          json(res, 400, { ok: false, error: error.message });
-          return;
-        }
-      }
-      try {
-        const result = await voiceChanger.handle(
-          pathname.slice('/api/vc'.length), req.method, body,
-        );
-        json(res, result.status, result.data);
-      } catch (error) {
-        json(res, 503, { ok: false, error: error.message });
-      }
       return;
     }
 

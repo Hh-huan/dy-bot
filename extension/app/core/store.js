@@ -75,16 +75,6 @@ export const SETTINGS_DEFAULTS = {
     apiKey: '',
     fallbackBrowser: false,
   },
-  voiceChanger: {
-    enabled: false,
-    inputDevice: null,
-    inputName: '',
-    outputDevice: null,
-    outputName: '',
-    referencePath: 'reference/pet-voice.wav',
-    diffusionSteps: 8,
-    blockTime: 0.3,
-  },
   warmup: {
     enabled: false,
     idleSec: 90,
@@ -145,17 +135,6 @@ export function mergeSettings(input) {
     petBridge: { ...SETTINGS_DEFAULTS.petBridge, ...(saved.petBridge || {}), enabled: false },
     dshPet: { ...SETTINGS_DEFAULTS.dshPet, ...(saved.dshPet || {}) },
     tts: { ...SETTINGS_DEFAULTS.tts, ...(saved.tts || {}) },
-    voiceChanger: {
-      ...SETTINGS_DEFAULTS.voiceChanger,
-      ...(saved.voiceChanger || {}),
-      diffusionSteps: Math.round(
-        Math.min(25, Math.max(4, Number(saved.voiceChanger?.diffusionSteps) || 8)),
-      ),
-      blockTime: Math.min(
-        0.5,
-        Math.max(0.15, Number(saved.voiceChanger?.blockTime) || 0.3),
-      ),
-    },
     warmup: { ...SETTINGS_DEFAULTS.warmup, ...(saved.warmup || {}) },
     board: {
       ...SETTINGS_DEFAULTS.board,

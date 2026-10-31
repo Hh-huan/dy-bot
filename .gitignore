@@ -1,14 +1,9 @@
 # 依赖与本地环境
 node_modules/
-voice-changer/.venv/
-voice-changer/checkpoints/
-voice-changer/__pycache__/
 **/__pycache__/
 
 # 个人配置与密钥（绝不入库）
 private/
-voice-changer/config.json
-voice-changer/reference/
 
 # 运行时产物 / 日志 / 台账
 *.log
@@ -18,7 +13,6 @@ bridge/memory.json
 bridge/user-ledger.jsonl
 bridge/song-violations.json
 bridge/song-state.json
-voice-changer/service.log
 
 # 临时文件
 .DS_Store

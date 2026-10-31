@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>直播背景板</title>
+    <link rel="stylesheet" href="/board/board.css?v=1.16.83" />
+  </head>
+  <body>
+    <div class="avatar-bubbles" id="avatarBubbles" aria-hidden="true"></div>
+    <div class="stage">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo-cd" role="img" aria-label="大肥鱼 CD">
+            <div class="logo-cd-spin">
+              <div class="logo-cd-label">
+                <img class="logo-cd-photo" src="/board/pet-cd-label.jpg" alt="" />
+              </div>
+              <span class="logo-cd-hole"></span>
+            </div>
+            <span class="logo-cd-glint"></span>
+          </div>
+          <div class="brand-text">
+            <h1 id="roomTitle">我的直播间</h1>
+            <p>直播助手 · 实时弹幕</p>
+          </div>
+        </div>
+        <div class="top-right">
+          <span class="live"><i></i>LIVE</span>
+          <span class="clock" id="clock">--:--</span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <div class="left-column">
+          <section class="feed-panel">
+            <div class="panel-head">
+              <span class="panel-title" data-en="LIVE CHAT">弹幕聊天</span>
+              <span class="online" id="online">0 人在线</span>
+            </div>
+            <div class="feed" id="feed"></div>
+          </section>
+
+          <section class="guide-panel">
+            <div class="guide-row">
+              <span class="guide-key">玩法</span>
+              <span class="guide-value">送白饭 · 点歌 · 小心心插队</span>
+            </div>
+            <div class="guide-row">
+              <span class="guide-key">点歌</span>
+              <span class="guide-value">点歌 晴天</span>
+            </div>
+            <div class="guide-row">
+              <span class="guide-key">插队</span>
+              <span class="guide-value">任意礼物：已点歌可插队</span>
+            </div>
+            <div class="guide-row">
+              <span class="guide-key">切歌</span>
+              <span class="guide-value">在队列中，播放满 90 秒发「切歌」</span>
+            </div>
+            <div class="guide-row">
+              <span class="guide-key">飘屏</span>
+              <span class="guide-value">送白饭进气泡流，发「甩飞 昵称」把 TA 甩出去</span>
+            </div>
+            <div class="guide-row">
+              <span class="guide-key">指令</span>
+              <span class="guide-value">动作 跳舞 / 动作 转圈 / 我要看魔术</span>
+            </div>
+          </section>
+        </div>
+
+        <div class="stage-column">
+          <section class="gifters-panel">
+            <div class="gifters-head">
+              <span class="panel-title" data-en="TOP GIVERS">送礼榜</span>
+              <span class="gifters-count" id="giftersCount">0 人</span>
+            </div>
+            <div class="gifters-list" id="giftersList">
+              <span class="gifters-empty">还没有人送礼物</span>
+            </div>
+          </section>
+
+          <section class="gift-panel">
+            <div class="rice-info">
+              <div class="gift-head">
+                <span id="giftHeadLabel">收到礼物</span>
+                <b id="giftTotal">0</b>
+              </div>
+              <div class="gift-list" id="giftList">
+                <span class="gift-empty">还没有收到礼物</span>
+              </div>
+              <div class="api-line">白饭剩余：<strong id="apiQuota">--</strong></div>
+            </div>
+          </section>
+
+          <section class="pet-stage" id="petStage" aria-label="桌宠站位">
+            <div class="pet-glow"><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="pet-floor"></div>
+            <div class="pickup" id="pickup">
+              <button type="button" class="pickup-head" id="pickupToggle" title="点击共享系统音频（音乐播放器）">
+                <span class="pickup-name">拾音器</span>
+                <em class="pickup-state" id="pickupState">共享系统音频</em>
+              </button>
+              <canvas id="pickupCanvas" aria-hidden="true"></canvas>
+            </div>
+            <span class="pet-label">PET STAGE · 桌宠站位</span>
+          </section>
+        </div>
+
+        <aside class="side">
+          <section class="now-card" id="nowCard">
+            <div class="cover" id="cover"><span>♪</span></div>
+            <div class="now-info">
+              <span class="eyebrow">NOW PLAYING</span>
+              <h2 id="songTitle">还没有点歌</h2>
+              <p id="songArtist">评论区输入「点歌 歌名」</p>
+            </div>
+            <div class="progress"><span id="progressBar"></span></div>
+            <div class="song-actions">
+              <button type="button" id="pauseBtn" title="暂停 / 继续">⏯</button>
+              <button type="button" id="skipBtn" title="下一首">⏭</button>
+            </div>
+          </section>
+
+          <section class="queue-card">
+            <div class="panel-head">
+              <span class="panel-title" data-en="UP NEXT">点歌队列</span>
+              <span class="queue-count" id="queueCount">0</span>
+            </div>
+            <ol class="queue" id="queue"></ol>
+          </section>
+
+          <section class="stats-card">
+            <button type="button" class="stats-clear" id="statsClear" title="清空本场统计">清空</button>
+            <div><strong id="statOnline">0</strong><span>在线</span></div>
+            <div><strong id="statWatch">0</strong><span>累计观看</span></div>
+            <div><strong id="statLike">0</strong><span>累计点赞</span></div>
+            <div><strong id="statLastGift" class="metric-text">—</strong><span>最近礼物</span></div>
+            <div><strong id="statChat">0</strong><span>弹幕</span></div>
+            <div><strong id="statReply">0</strong><span>回复</span></div>
+            <div><strong id="statFollow">0</strong><span>今日关注</span></div>
+            <div><strong id="statPlay" class="metric-text">点歌 / 白饭</strong><span>玩法</span></div>
+          </section>
+        </aside>
+      </main>
+
+      <!-- 本地播放：点歌音频直链由 bridge 下发，OBS 浏览器源音频直接进直播 -->
+      <audio id="songAudio" preload="auto" style="display: none"></audio>
+
+      <footer class="footer">
+        <span id="statusText">等待直播数据…</span>
+        <span class="hint">发弹幕 / 点歌，都会实时出现在这里</span>
+      </footer>
+    </div>
+
+    <!-- 今日消耗白饭：沿屏幕四周逆时针匀速循环行进（字符由 board.js 按字数生成） -->
+    <div class="rice-marquee" id="riceMarquee" aria-hidden="true"></div>
+
+    <script src="/board/giftCombo.js?v=1.16.83"></script>
+    <script src="/board/board.js?v=1.16.83"></script>
+  </body>
+</html>

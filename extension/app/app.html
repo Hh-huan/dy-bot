@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>抖音直播弹幕助手 · 主播版</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo" aria-hidden="true">DY</div>
+          <div class="brand-text">
+            <h1>直播弹幕助手 <span id="appVersion" class="version-chip">v1.16.83</span></h1>
+            <p id="roomLabel" title="">等待直播间…</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button class="ghost-btn" id="openLiveBtn" title="打开我的直播间">我的直播</button>
+          <button class="ghost-btn" id="openTabBtn" title="在标签页中打开">⤢</button>
+          <button class="ghost-btn" id="helpBtn" title="使用说明">?</button>
+        </div>
+      </header>
+
+      <div class="statusbar">
+        <span id="connDot" class="dot idle"></span>
+        <span id="connText">等待页面数据…</span>
+        <span class="grow"></span>
+        <label class="switch master" title="服务总开关：关闭后暂停回复、点歌、背景板、桌宠、暖场；再次开启恢复上次状态">
+          <input type="checkbox" id="serviceToggle" />
+          <span class="track"></span>
+          <span class="switch-text">服务</span>
+        </label>
+        <label class="switch" title="自动回复总开关">
+          <input type="checkbox" id="replyToggle" />
+          <span class="track"></span>
+          <span class="switch-text">自动回复</span>
+        </label>
+      </div>
+
+      <div class="banner" id="leaderBanner" hidden>
+        另一个助手窗口正在处理自动回复，本窗口只用于查看（可关闭多余窗口后自动接管）。
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="live" role="tab">直播</button>
+        <button class="tab" data-tab="rules" role="tab">规则</button>
+        <button class="tab" data-tab="logs" role="tab">记录</button>
+        <button class="tab" data-tab="settings" role="tab">设置</button>
+      </nav>
+
+      <main class="content">
+        <section class="view active" data-view="live">
+          <div class="host-card" id="hostSetup" hidden>
+            <div class="host-card-head">
+              <span class="host-tag">主播模式</span>
+              <strong>先绑定你的直播间</strong>
+            </div>
+            <p class="muted">
+              自动回复只会发到你的直播间。请用<strong>开播的主播账号</strong>登录网页版，并保持自己的直播间页面打开；
+              手机开播、直播伴侣开播都可以。
+            </p>
+            <div class="host-card-row">
+              <input id="myRoomInput" type="text" placeholder="粘贴直播间链接，或输入房间号" />
+              <button type="button" class="primary-btn" id="bindRoomBtn">绑定</button>
+              <button type="button" class="ghost-btn" id="bindCurrentBtn">用当前页</button>
+            </div>
+            <p class="host-card-hint" id="hostSetupHint"></p>
+          </div>
+
+          <div class="stat-grid">
+            <div class="stat">
+              <span class="stat-label">在线观众</span>
+              <strong id="statOnline">—</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">累计观看</span>
+              <strong id="statCumulative">—</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">收到消息</span>
+              <strong id="statReceived">0</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">已回复</span>
+              <strong id="statReplied">0</strong>
+            </div>
+          </div>
+
+          <div class="toolbar">
+            <div class="chips" id="filterChips">
+              <button class="chip active" data-filter="all">全部</button>
+              <button class="chip" data-filter="chat">评论</button>
+              <button class="chip" data-filter="gift">礼物</button>
+              <button class="chip" data-filter="member">进场</button>
+              <button class="chip" data-filter="follow">关注</button>
+              <button class="chip" data-filter="like">点赞</button>
+            </div>
+            <div class="toolbar-actions">
+              <label class="mini-check" title="新消息时自动滚动到底部">
+                <input type="checkbox" id="autoscrollToggle" checked />
+                跟随
+              </label>
+              <button class="icon-btn" id="exportFeedBtn" title="导出弹幕 CSV">⤓</button>
+              <button class="icon-btn" id="clearFeedBtn" title="清空弹幕">✕</button>
+            </div>
+          </div>
+
+          <ul class="feed" id="feed" aria-live="polite"></ul>
+          <div class="empty" id="feedEmpty">
+            <p>还没有收到弹幕</p>
+            <p class="muted">
+              用主播账号打开<strong>你自己的直播间</strong>（不是别人的直播间），并保持页面打开，数据会自动出现在这里。
+            </p>
+          </div>
+
+          <div class="composer">
+            <input id="manualInput" type="text" maxlength="100" placeholder="手动回复一条弹幕…" />
+            <button class="primary-btn" id="manualSendBtn">发送</button>
+          </div>
+          <p class="hint" id="sendHint">正在加载设置…</p>
+        </section>
+
+        <section class="view" data-view="rules">
+          <div class="section-head">
+            <div>
+              <h2>自动回复规则</h2>
+              <p class="muted">按列表顺序匹配，命中后回复；可拖动顺序用 ↑↓ 调整。</p>
+            </div>
+            <button class="primary-btn" id="addRuleBtn">＋ 新规则</button>
+          </div>
+          <div class="rules-list" id="rulesList"></div>
+          <div class="empty small" id="rulesEmpty" hidden>
+            <p>还没有规则</p>
+            <p class="muted">点击右上角「新规则」，或从内置模板开始。</p>
+          </div>
+          <div class="tpl-hint">
+            <span class="muted">模板变量：</span>
+            <span id="templateVars" class="vars"></span>
+          </div>
+        </section>
+
+        <section class="view" data-view="logs">
+          <div class="section-head">
+            <div>
+              <h2>运行记录</h2>
+              <p class="muted">发送结果、队列丢弃与错误都会记录在这里（最多 300 条）。</p>
+            </div>
+            <button class="ghost-btn" id="clearLogsBtn">清空</button>
+          </div>
+          <ul class="log-list" id="logList"></ul>
+          <div class="empty small" id="logsEmpty">
+            <p>暂无记录</p>
+            <p class="muted">开启自动回复后，这里会显示每一次发送结果。</p>
+          </div>
+        </section>
+
+        <section class="view" data-view="settings">
+          <form id="settingsForm" class="settings-form" autocomplete="off">
+            <div class="settings-group">
+              <h2>主播模式</h2>
+              <p class="muted">
+                只处理你自己的直播间。回复通过网页版直播间页面发出，请确保浏览器登录的是<strong>开播的主播账号</strong>。
+              </p>
+              <label class="field">
+                <span>我的直播间链接</span>
+                <input type="url" id="setMyRoomUrl" placeholder="https://live.douyin.com/123456789" />
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>我的昵称（用于忽略自己发的消息）</span>
+                  <input type="text" id="setMyNickname" placeholder="主播昵称" />
+                </label>
+                <label class="field">
+                  <span>我的用户 ID（可选）</span>
+                  <input type="text" id="setMyUserId" placeholder="选填" />
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h2>发送控制</h2>
+              <label class="check-row">
+                <input type="checkbox" id="setDryRun" />
+                <span>
+                  <strong>演练模式</strong>
+                  <em>只匹配规则、不真正发送。建议先用它验证规则，确认无误后再关闭。</em>
+                </span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" id="setAutoResumeLive" />
+                <span>
+                  <strong>直播自动恢复播放</strong>
+                  <em>网页版直播间自己暂停时自动点播放；关闭后不干预，手动暂停也不会被恢复。</em>
+                </span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>全局发送间隔（秒）</span>
+                  <input type="number" id="setReplyInterval" min="0" max="60" step="0.5" />
+                </label>
+                <label class="field">
+                  <span>每分钟最多回复</span>
+                  <input type="number" id="setMaxPerMin" min="0" max="300" step="1" />
+                </label>
+              </div>
+              <label class="field">
+                <span>单条回复字数上限</span>
+                <input type="number" id="setMaxChars" min="10" max="100" step="1" />
+              </label>
+              <p class="muted small-note">
+                单用户频率、单条消息回复条数、待发送队列与回显过滤均由插件内置，无需手动设置。
+              </p>
+            </div>
+
+            <div class="settings-group">
+              <h2>过滤</h2>
+              <label class="field">
+                <span>屏蔽关键词（每行一个，命中后不自动回复）</span>
+                <textarea id="setBlockedKeywords" rows="3" placeholder="例如：广告&#10;加微信"></textarea>
+              </label>
+              <label class="field">
+                <span>忽略用户（每行一个昵称或用户 ID）</span>
+                <textarea id="setBlockedUsers" rows="3" placeholder="例如：机器人小助手"></textarea>
+              </label>
+            </div>
+
+            <div class="settings-group">
+              <h2>AI 智能回复 <span class="tag">推荐</span></h2>
+              <p class="muted">
+                开启后默认所有评论都走 AI；礼物 / 进场 / 关注 / 点赞仍可用规则处理。API Key 只保存在本机，
+                但最近几条弹幕会发送给你配置的接口服务商。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setAiEnabled" />
+                <span>启用 AI 回复</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>回复模式</span>
+                  <select id="setAiMode">
+                    <option value="always">所有评论都走 AI（优先）</option>
+                    <option value="fallback">仅无规则命中时走 AI</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>主服务</span>
+                  <select id="setAiProvider"></select>
+                </label>
+              </div>
+              <p class="muted small-note">接口地址和模型由所选服务商自动匹配，无需填写。</p>
+              <label class="field">
+                <span>API Key</span>
+                <input type="password" id="setAiKey" placeholder="sk-..." spellcheck="false" />
+              </label>
+              <label class="field">
+                <span>人设 / 系统提示词</span>
+                <textarea id="setAiPrompt" rows="3"></textarea>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>AI 回复冷却（秒）</span>
+                  <input type="number" id="setAiCooldown" min="1" max="600" step="1" />
+                </label>
+                <div class="field align-end">
+                  <button type="button" class="ghost-btn" id="testAiBtn">测试 AI</button>
+                </div>
+              </div>
+              <p class="status-line" id="aiStatus"></p>
+
+              <details class="advanced">
+                <summary>备用服务（主服务失败时自动切换）</summary>
+                <label class="check-row slim">
+                  <input type="checkbox" id="setAiFallbackEnabled" />
+                  <span>启用备用服务</span>
+                </label>
+                <label class="field">
+                  <span>备用服务</span>
+                  <select id="setAiFallbackProvider"></select>
+                </label>
+                <label class="field">
+                  <span>备用 API Key</span>
+                  <input type="password" id="setAiFallbackKey" placeholder="sk-..." spellcheck="false" />
+                </label>
+              </details>
+            </div>
+
+            <div class="settings-group">
+              <h2>DSH 桌宠联动 <span class="tag">已安装</span></h2>
+              <p class="muted">
+                直接连接当前 DSH 里的 dsh-pet：AI 回复 / 礼物 / 关注会出现在桌宠气泡里，
+                右键桌宠还能控制自动回复、演练模式和 AI。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setDshPetEnabled" />
+                <span>启用 DSH 桌宠联动</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>显示端</span>
+                  <select id="setDshPetSurface">
+                    <option value="desktop">桌面窗</option>
+                    <option value="web">DSH 网页</option>
+                    <option value="both">两端</option>
+                  </select>
+                </label>
+                <div class="field align-end">
+                  <label class="check-row slim">
+                    <input type="checkbox" id="setDshPetMenu" />
+                    <span>注册右键菜单</span>
+                  </label>
+                </div>
+              </div>
+              <label class="check-row slim">
+                <input type="checkbox" id="setDshIdleAnim" />
+                <span>空闲时自动播放桌宠动作</span>
+              </label>
+              <div class="field-row">
+                <label class="check-row slim">
+                  <input type="checkbox" id="setDshActionCommands" />
+                  <span>弹幕动作指令（如「跳舞」「动作 转圈」）</span>
+                </label>
+                <label class="check-row slim">
+                  <input type="checkbox" id="setDshLikeThanks" />
+                  <span>点赞感谢（气泡 + 语音）</span>
+                </label>
+              </div>
+              <label class="check-row slim">
+                <input type="checkbox" id="setDshPetChatBubble" />
+                <span>弹幕气泡播报</span>
+              </label>
+              <div class="button-row">
+                <button type="button" class="ghost-btn" id="testDshPetBtn">测试气泡</button>
+                <button type="button" class="ghost-btn" id="refreshDshPetBtn">读取宠物列表</button>
+              </div>
+              <p class="status-line" id="dshPetStatus"></p>
+              <p class="muted small-note">自动连接本机 DSH（127.0.0.1:64864），桌宠 ID 自动选择，无需手动填写。</p>
+            </div>
+
+            <div class="settings-group">
+              <h2>语音朗读 <span class="tag">MiniMax TTS</span></h2>
+              <p class="muted">
+                AI 回复会调用 MiniMax 合成语音；默认音色「幼小可爱 · Cute Spirit」，语速与音调由插件内置。
+                API Key 留空时自动使用 AI 备用服务里的 MiniMax Key。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setDshPetTts" />
+                <span>启用语音朗读（AI 回复）</span>
+              </label>
+              <label class="field">
+                <span>音色</span>
+                <select id="setTtsVoice"></select>
+              </label>
+              <label class="field" id="ttsCustomVoiceField" hidden>
+                <span>自定义 voice_id</span>
+                <input type="text" id="setTtsVoiceCustom" placeholder="Chinese (Mandarin)_Cute_Spirit" />
+              </label>
+              <div class="button-row">
+                <button type="button" class="ghost-btn" id="testTtsBtn">测试语音</button>
+                <span id="ttsStatus" class="status-line"></span>
+              </div>
+              <details class="advanced">
+                <summary>高级（API Key）</summary>
+                <label class="field">
+                  <span>API Key（留空自动复用备用 Key）</span>
+                  <input type="password" id="setTtsKey" placeholder="留空即可" />
+                </label>
+              </details>
+            </div>
+
+            <div class="settings-group">
+              <h2>实时变声 <span class="tag">Seed-VC</span></h2>
+              <p class="muted">
+                麦克风声音实时转成桌宠音色，再输出到虚拟声卡。直播软件或游戏把麦克风选为
+                「CABLE Output」后，观众听到的就是变声后的声音。首次启动会自动下载模型。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setVoiceChangerEnabled" />
+                <span>启用实时变声</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>麦克风</span>
+                  <select id="setVoiceChangerInput"></select>
+                </label>
+                <label class="field">
+                  <span>输出设备</span>
+                  <select id="setVoiceChangerOutput"></select>
+                </label>
+              </div>
+              <label class="field">
+                <span>参考音色</span>
+                <input type="text" id="setVoiceChangerReference" placeholder="reference/pet-voice.wav" />
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>扩散步数</span>
+                  <input type="number" id="setVoiceChangerSteps" min="4" max="25" step="1" />
+                </label>
+                <label class="field">
+                  <span>块时长（秒）</span>
+                  <input type="number" id="setVoiceChangerBlock" min="0.15" max="0.5" step="0.01" />
+                </label>
+              </div>
+              <div class="button-row">
+                <button type="button" class="ghost-btn" id="refreshVoiceChangerBtn">刷新设备</button>
+                <button type="button" class="ghost-btn" id="startVoiceChangerBtn">启动变声</button>
+                <button type="button" class="ghost-btn" id="stopVoiceChangerBtn">停止</button>
+                <span id="voiceChangerStatus" class="status-line"></span>
+              </div>
+              <p class="muted small-note">
+                未检测到 VB-Cable 时只能输出到扬声器；要让其他软件接收变声后的麦克风，请先安装
+                VB-Cable，再把输出设备选为「CABLE Input」。
+              </p>
+            </div>
+
+            <div class="settings-group">
+              <h2>暖场发言 <span class="tag">自动</span></h2>
+              <p class="muted">
+                直播间安静或人少时，让 AI 说一句暖场话：可以发到直播间公屏、显示在桌宠气泡，并用 MiniMax 语音念出来。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setWarmupEnabled" />
+                <span>启用自动暖场</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>无人说话（秒）</span>
+                  <input type="number" id="setWarmupIdle" min="20" max="1800" step="5" />
+                </label>
+                <label class="field">
+                  <span>最短间隔（秒）</span>
+                  <input type="number" id="setWarmupInterval" min="30" max="3600" step="10" />
+                </label>
+              </div>
+              <div class="field-row">
+                <div class="field align-end">
+                  <label class="check-row slim">
+                    <input type="checkbox" id="setWarmupGreetViewer" />
+                    <span>随机挑观众打招呼</span>
+                  </label>
+                  <label class="check-row slim">
+                    <input type="checkbox" id="setWarmupSend" />
+                    <span>发到直播间公屏</span>
+                  </label>
+                  <label class="check-row slim">
+                    <input type="checkbox" id="setWarmupBubble" />
+                    <span>桌宠气泡</span>
+                  </label>
+                  <label class="check-row slim">
+                    <input type="checkbox" id="setWarmupSpeak" />
+                    <span>语音朗读</span>
+                  </label>
+                </div>
+              </div>
+              <div class="button-row">
+                <button type="button" class="ghost-btn" id="warmupNowBtn">立即暖场一次</button>
+                <span id="warmupStatus" class="status-line"></span>
+              </div>
+              <details class="advanced">
+                <summary>暖场风格 & 预设</summary>
+                <label class="field">
+                  <span>预设暖场语（每行一条，支持 {name}）</span>
+                  <textarea id="setWarmupPresets" rows="3" placeholder="例如：欢迎来到直播间，点点关注不迷路～"></textarea>
+                </label>
+                <label class="field">
+                  <span>额外要求（可留空）</span>
+                  <textarea id="setWarmupPrompt" rows="2" placeholder="例如：轻松一点，多邀请观众点关注"></textarea>
+                </label>
+              </details>
+            </div>
+
+            <div class="settings-group">
+              <h2>直播背景板 <span class="tag">OBS</span></h2>
+              <p class="muted">
+                背景板由本地桥接提供，显示弹幕、AI 回复和点歌队列。用 OBS 的「浏览器源」打开下面的地址，分辨率建议 1920×1080。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setBoardEnabled" />
+                <span>启用背景板事件推送</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>OBS 浏览器源地址</span>
+                  <input type="text" id="boardObsUrl" readonly />
+                </label>
+                <label class="field">
+                  <span>桌宠站位</span>
+                  <select id="setBoardPetSlot">
+                    <option value="center">中间（推荐）</option>
+                    <option value="left">左侧</option>
+                    <option value="right">右侧</option>
+                    <option value="none">不预留</option>
+                  </select>
+                </label>
+              </div>
+              <div class="field-row">
+                <label class="field">
+                  <span>送礼头像飘屏数量</span>
+                  <input type="number" id="setBoardBubbles" min="0" max="30" step="1" placeholder="10" />
+                </label>
+              </div>
+              <p class="hint">送礼榜前 N 名的头像会在画面中自由漂浮、撞边反弹；0 表示关闭。</p>
+              <p class="hint">背景板会空出对应站位；在 OBS 里把 DSH 桌宠窗口捕获叠在这一区域。</p>
+              <div class="button-row">
+                <button type="button" class="ghost-btn" id="testBoardBtn">测试连接</button>
+                <button type="button" class="ghost-btn" id="openBoardBtn">打开背景板</button>
+                <button type="button" class="ghost-btn" id="copyBoardBtn">复制 OBS 地址</button>
+                <button type="button" class="ghost-btn" id="clearGiftStatsBtn">清空礼物统计</button>
+                <span id="boardStatus" class="status-line"></span>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h2>点歌 <span class="tag">QQ 音乐</span></h2>
+              <p class="muted">
+                观众发「点歌 晴天」「点一首晴天」「想听晴天」「来首晴天」等说法都会加入点歌队列，播放器固定为 QQ 音乐、无点歌冷却。切歌需当前歌曲播放满设定秒数，且自己有点歌正在播放或排队中。音量指令支持「音量调到40」「声音30%」「声音大点」「小点声」「音量最大/最小」，范围限制 20%~70%。需要本地桥接常驻。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setSongEnabled" />
+                <span>启用弹幕点歌</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>命令前缀</span>
+                  <input type="text" id="setSongPrefix" placeholder="点歌" />
+                </label>
+                <label class="field">
+                  <span>每首歌最少播放（秒）</span>
+                  <input type="number" id="setSongMinPlay" min="10" max="600" step="5" />
+                </label>
+              </div>
+              <div class="field-row">
+                <label class="field">
+                  <span>切歌最少播放（秒）</span>
+                  <input type="number" id="setSongQueueCut" min="60" max="180" step="10" />
+                </label>
+                <label class="field">
+                  <span>插队资格有效（秒）</span>
+                  <input type="number" id="setSongPassSec" min="30" max="3600" step="30" />
+                </label>
+              </div>
+              <p class="hint">
+                当前歌曲不会自动切：只有播完、主播点下一首，或点歌队列里的观众发「切歌」才会换。切歌仍受这里设置的秒数限制（默认 90 秒），成功和失败都会语音提示；不在队列里的观众会被提示先点歌。队列空时播完自动接每日推荐，送「小心心」获得一次插队机会。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setSongHorrorFilter" />
+                <span>点歌前用 AI 审核恐怖/灵异类歌曲</span>
+              </label>
+              <label class="check-row slim">
+                <input type="checkbox" id="setSongDailyRecommend" />
+                <span>队列空时自动播放每日推荐</span>
+              </label>
+              <label class="check-row slim">
+                <input type="checkbox" id="setSongReply" />
+                <span>在直播间回复点歌结果</span>
+              </label>
+              <div class="button-row">
+                <input type="text" id="songTestQuery" placeholder="测试点歌：晴天" />
+                <button type="button" class="ghost-btn" id="testSongBtn">测试点歌</button>
+                <span id="songStatus" class="status-line"></span>
+              </div>
+              <p class="hint">播放器检测：<span id="songProviders">桥接未连接</span></p>
+            </div>
+
+            <div class="settings-group">
+              <h2>配置与数据</h2>
+              <div class="button-row">
+                <button type="button" class="ghost-btn" id="exportConfigBtn">导出配置</button>
+                <button type="button" class="ghost-btn" id="importConfigBtn">导入配置</button>
+                <button type="button" class="ghost-btn danger" id="resetAllBtn">恢复默认</button>
+              </div>
+              <input type="file" id="importFile" accept="application/json" hidden />
+              <p class="muted small-note">
+                所有数据（设置、规则、密钥）都保存在本机浏览器扩展存储中，不会上传到任何服务器。
+              </p>
+            </div>
+
+            <div class="settings-group risk">
+              <h2>使用须知</h2>
+              <ul class="plain-list">
+                <li>仅供学习研究，请遵守抖音社区规范与相关法律法规。</li>
+                <li>自动回复属于模拟人工操作，频率过高可能触发平台风控，请保守配置间隔与上限。</li>
+                <li>请勿用于刷屏、引流、诈骗等违规行为，后果由使用者自行承担。</li>
+              </ul>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="ruleDialog" class="dialog">
+      <form id="ruleForm" method="dialog" class="dialog-form">
+        <header class="dialog-head">
+          <h2 id="ruleDialogTitle">编辑规则</h2>
+          <button type="button" class="icon-btn" id="ruleCancelBtn" aria-label="关闭">✕</button>
+        </header>
+        <div class="dialog-body">
+          <input type="hidden" id="ruleId" />
+          <label class="field">
+            <span>规则名称</span>
+            <input type="text" id="ruleName" maxlength="40" placeholder="例如：价格咨询回复" />
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span>触发场景</span>
+              <select id="ruleScope"></select>
+            </label>
+            <label class="field">
+              <span>匹配方式</span>
+              <select id="ruleMatchMode"></select>
+            </label>
+          </div>
+          <label class="field" id="patternField">
+            <span>关键词（每行一个）</span>
+            <textarea id="rulePatterns" rows="3" placeholder="价格&#10;怎么买"></textarea>
+          </label>
+          <div class="field-row" id="giftFields" hidden>
+            <label class="field">
+              <span>礼物名称（每行一个，留空=所有礼物）</span>
+              <textarea id="ruleGiftNames" rows="2" placeholder="小心心"></textarea>
+            </label>
+            <label class="field">
+              <span>最低礼物数量</span>
+              <input type="number" id="ruleMinGiftCount" min="0" max="100000" step="1" />
+            </label>
+          </div>
+          <label class="field" id="likeField" hidden>
+            <span>最低点赞数量</span>
+            <input type="number" id="ruleMinLikeCount" min="1" max="100000" step="1" />
+          </label>
+          <label class="field">
+            <span>回复内容（每行一条，随机或轮换发送）</span>
+            <textarea id="ruleReplies" rows="4" placeholder="{nickname} 点击下方小黄车就能看到哦~"></textarea>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span>回复方式</span>
+              <select id="ruleReplyMode"></select>
+            </label>
+            <label class="field">
+              <span>同一用户冷却（秒）</span>
+              <input type="number" id="ruleCooldown" min="0" max="3600" step="1" />
+            </label>
+          </div>
+          <div class="field-row">
+            <label class="field">
+              <span>该规则每分钟上限</span>
+              <input type="number" id="ruleMaxPerMin" min="0" max="600" step="1" />
+            </label>
+            <div class="field align-end">
+              <label class="check-row slim">
+                <input type="checkbox" id="rulePerUserOnce" />
+                <span>每个用户只回复一次</span>
+              </label>
+              <label class="check-row slim">
+                <input type="checkbox" id="ruleEnabled" />
+                <span>启用此规则</span>
+              </label>
+            </div>
+          </div>
+          <div class="preview" id="rulePreview">预览：—</div>
+          <p class="muted small-note">
+            可用变量：{nickname} {content} {gift} {count} {online} {time}，随机文案用 {{A|B}}。
+          </p>
+        </div>
+        <footer class="dialog-foot">
+          <button type="button" class="ghost-btn" id="ruleCancelBtn2">取消</button>
+          <button type="submit" class="primary-btn">保存规则</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="helpDialog" class="dialog">
+      <form method="dialog" class="dialog-form">
+        <header class="dialog-head">
+          <h2>使用说明</h2>
+          <button class="icon-btn" aria-label="关闭">✕</button>
+        </header>
+        <div class="dialog-body help-body">
+          <ol class="steps">
+            <li>用<strong>开播的主播账号</strong>登录网页版抖音，打开你自己的直播间（<code>live.douyin.com/房间号</code>），保持页面打开。</li>
+            <li>点击扩展图标打开侧边栏，在顶部卡片里粘贴直播间链接绑定（或点「用当前页」）。</li>
+            <li>在「规则」里启用模板或新建规则；变量 {nickname} 会替换成观众昵称。</li>
+            <li>到「设置」确认处于<strong>演练模式</strong>，打开顶部「自动回复」，观察「记录」中的匹配结果。</li>
+            <li>确认无误后关闭演练模式，回复就会真正发送到你的直播间。</li>
+          </ol>
+          <p class="muted">
+            手机开播、直播伴侣开播都可以：只要电脑浏览器里打开了自己的直播间，回复就会以该登录账号发出，并出现在直播间弹幕里。
+          </p>
+          <p class="muted">
+            提示：侧边栏关闭后自动回复会停止；需要长时间挂机时，可以用右上角 ⤢ 在独立标签页中打开本页面。
+          </p>
+          <p class="muted">
+            桌宠动作口令：单个动作发「跳舞」「转圈」「token来」这类短句即可；组合连招发
+            「谢礼三连」「鲸鱼秀」「暴走三连」「撒娇三连」「打工三连」「拜年」，桌宠会连续表演三段动画。
+            暖场说到「token来，token来！」时，桌宠也会自动播放 token 向胸口汇聚的动画；
+            发「token回」「回token」「token回来」这类口令，桌宠会回「token来！token来！」并播放同一动作。
+          </p>
+          <p class="muted">
+            原理：扩展在页面内旁路监听抖音自身的弹幕 WebSocket（只读），本地解析 protobuf；
+            回复时模拟页面输入并点击「发送」，复用你已登录的会话，不破解签名、不上传数据。
+          </p>
+        </div>
+        <footer class="dialog-foot">
+          <button class="primary-btn" value="ok">知道了</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+
+    <dialog id="confirmDialog" class="dialog">
+      <div class="dialog-form">
+        <header class="dialog-head">
+          <h2>请确认</h2>
+        </header>
+        <div class="dialog-body">
+          <p id="confirmText" class="confirm-text"></p>
+        </div>
+        <footer class="dialog-foot">
+          <button type="button" class="ghost-btn" id="confirmCancel">取消</button>
+          <button type="button" class="primary-btn" id="confirmOk">确定</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
+

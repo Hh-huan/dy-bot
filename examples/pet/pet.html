@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>桌宠 · 抖音直播助手</title>
+    <link rel="stylesheet" href="pet.css" />
+  </head>
+  <body>
+    <div class="pet-app">
+      <header class="pet-top">
+        <span class="conn-dot" id="connDot"></span>
+        <span class="conn-text" id="connText">连接桥接中…</span>
+        <span class="spacer"></span>
+        <button type="button" class="mini-btn" id="ttsBtn" title="语音朗读">🔊</button>
+        <button type="button" class="mini-btn" id="chatToggle" title="收起/展开弹幕">💬</button>
+      </header>
+
+      <section class="pet-stage">
+        <div class="bubble" id="bubble" hidden></div>
+        <div class="pet" id="pet">
+          <div class="ear left"></div>
+          <div class="ear right"></div>
+          <div class="head">
+            <div class="face">
+              <span class="eye left"></span>
+              <span class="eye right"></span>
+              <span class="mouth"></span>
+              <span class="cheek left"></span>
+              <span class="cheek right"></span>
+            </div>
+          </div>
+          <div class="body"><div class="belly"></div></div>
+          <div class="arm left"></div>
+          <div class="arm right"></div>
+          <div class="foot left"></div>
+          <div class="foot right"></div>
+        </div>
+        <div class="shadow"></div>
+      </section>
+
+      <section class="chat" id="chatPanel">
+        <div class="chat-head">
+          <span>直播间弹幕</span>
+          <span class="online" id="online">在线 —</span>
+        </div>
+        <ul class="chat-list" id="chatList"></ul>
+        <form class="reply-form" id="replyForm">
+          <input id="replyInput" type="text" maxlength="100" placeholder="以主播身份回复…" autocomplete="off" />
+          <button type="submit">发送</button>
+        </form>
+      </section>
+
+      <footer class="pet-controls">
+        <button type="button" class="ctrl" id="autoBtn" data-action="toggle_auto_reply">自动回复</button>
+        <button type="button" class="ctrl" id="dryBtn" data-action="toggle_dry_run">演练</button>
+        <button type="button" class="ctrl" id="aiBtn" data-action="set_ai">AI</button>
+        <button type="button" class="ctrl" id="statusBtn" data-action="status">状态</button>
+      </footer>
+    </div>
+
+    <script src="pet.js"></script>
+  </body>
+</html>

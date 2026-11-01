@@ -1,6 +1,6 @@
 {
   "name": "dy-live-companion",
-  "version": "1.16.83",
+  "version": "1.16.85",
   "private": true,
   "type": "module",
   "description": "主播版：读取你自己抖音直播间的评论与弹幕，按规则 / AI 自动回复，可接桌宠、背景板与点歌（MV3，零依赖）",

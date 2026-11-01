@@ -713,6 +713,10 @@ test('音乐音量指令识别宽泛，且不误判普通弹幕', () => {
     '音乐调到50': { action: 'set', volume: 50 },
     '调到50': { action: 'set', volume: 50 },
     '音量200': { action: 'set', volume: 200 },
+    '音量调到五十': { action: 'set', volume: 50 },
+    '声音调到十五': { action: 'set', volume: 15 },
+    '音量调到一百': { action: 'set', volume: 100 },
+    '音量调到百分之五十': { action: 'set', volume: 50 },
     '音量加10': { action: 'up', step: 10 },
     '音量减5': { action: 'down', step: 5 },
     '声音大点': { action: 'up' },
@@ -739,7 +743,16 @@ test('音乐音量指令识别宽泛，且不误判普通弹幕', () => {
     assert.deepEqual(parseVolumeIntent(input), expected, input);
   }
 
-  for (const input of ['这首歌真好听', '点歌 7 rings', '今天天气不错', '声音真好听', '我想听晴天']) {
+  for (const input of [
+    '这首歌真好听',
+    '点歌 7 rings',
+    '今天天气不错',
+    '声音真好听',
+    '我想听晴天',
+    '点歌 七里香',
+    '音量调到一半',
+    '音量调到十点五',
+  ]) {
     assert.equal(parseVolumeIntent(input), null, input);
   }
 });

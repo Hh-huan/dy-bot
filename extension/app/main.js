@@ -1860,7 +1860,9 @@ async function handleVolumeCommand(event) {
     });
     const result = await response.json();
     if (result.ok) {
-      const text = `${safeNickname(nickname)}，音乐音量已调到 ${result.volume}%（范围 ${result.min}%~${result.max}%）`;
+      const text = result.clamped
+        ? `${safeNickname(nickname)}，音量限 ${result.min}%~${result.max}%，已调到 ${result.volume}%`
+        : `${safeNickname(nickname)}，音乐音量已调到 ${result.volume}%（范围 ${result.min}%~${result.max}%）`;
       replySong(text);
       speakDsh(text, { priority: SPEECH_PRIORITY.song });
       toast(text, 'ok');
@@ -1870,7 +1872,7 @@ async function handleVolumeCommand(event) {
       replySong(text);
       speakDsh(text, { priority: SPEECH_PRIORITY.song });
       toast(text, 'warn');
-      log('warn', text);
+      log('warn', `音量：${nickname} ${JSON.stringify(intent)} → ${result.error || '未知错误'}`);
     }
   } catch {
     const text = '音量服务未连接，请稍后再试';

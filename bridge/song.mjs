@@ -668,9 +668,17 @@ function runQQVolume(args) {
   });
 }
 
+/** 解析外部传入的音量值，兼容数字与「50%」这类字符串；无法解析时返回 null。 */
+function parseVolumeValue(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const text = String(value ?? '').trim();
+  const match = text.match(/(\d+(?:\.\d+)?)(?:%|％)?/);
+  return match ? Number(match[1]) : null;
+}
+
 function clampVolume(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return null;
+  const number = parseVolumeValue(value);
+  if (number === null) return null;
   return Math.min(VOLUME_MAX, Math.max(VOLUME_MIN, Math.round(number)));
 }
 
@@ -1626,21 +1634,50 @@ export function createSongManager(options = {}) {
     return snapshot();
   }
 
-  /** 调节 QQ 音乐应用音量，范围固定 20%~70%。 */
+  /** 调节 QQ 音乐应用音量，范围固定 20%~70%，超出范围按边界值生效。 */
   async function setVolume(payload = {}) {
     const action = String(payload.action || 'set').toLowerCase();
     try {
-      const current = await runQQVolume(['-Action', 'get']);
+      let current = null;
       let target;
       if (action === 'max') target = VOLUME_MAX;
       else if (action === 'min') target = VOLUME_MIN;
-      else if (action === 'up') target = current + (Number(payload.step) || VOLUME_STEP);
-      else if (action === 'down') target = current - (Number(payload.step) || VOLUME_STEP);
-      else target = Number(payload.value ?? payload.volume);
-      const volume = clampVolume(target);
-      if (volume === null) return { ok: false, error: '音量值不正确' };
+      else if (action === 'up' || action === 'down') {
+        current = await runQQVolume(['-Action', 'get']);
+        const step = Math.max(1, Math.abs(Math.round(parseVolumeValue(payload.step) ?? VOLUME_STEP)));
+        target = action === 'up' ? current + step : current - step;
+      } else if (action === 'set') {
+        target = parseVolumeValue(payload.value ?? payload.volume);
+        if (target === null) {
+          return {
+            ok: false,
+            error: `请给出 ${VOLUME_MIN}~${VOLUME_MAX} 之间的音量数值`,
+            min: VOLUME_MIN,
+            max: VOLUME_MAX,
+          };
+        }
+        // 指定音量不依赖当前音量，读不到也不影响设置
+        try {
+          current = await runQQVolume(['-Action', 'get']);
+        } catch {
+          current = null;
+        }
+      } else {
+        return { ok: false, error: '不支持的音量操作', min: VOLUME_MIN, max: VOLUME_MAX };
+      }
+      const requested = Math.round(target);
+      const volume = clampVolume(requested);
+      if (volume === null) return { ok: false, error: '音量值不正确', min: VOLUME_MIN, max: VOLUME_MAX };
       const actual = await runQQVolume(['-Action', 'set', '-Volume', String(volume)]);
-      return { ok: true, volume: actual, previous: current, min: VOLUME_MIN, max: VOLUME_MAX };
+      return {
+        ok: true,
+        volume: actual,
+        requested,
+        clamped: volume !== requested,
+        previous: current,
+        min: VOLUME_MIN,
+        max: VOLUME_MAX,
+      };
     } catch (error) {
       return { ok: false, error: error.message, min: VOLUME_MIN, max: VOLUME_MAX };
     }

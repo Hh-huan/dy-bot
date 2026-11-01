@@ -127,9 +127,43 @@ export function parseCutSongIntent(content) {
   return new RegExp(`^${CUT_LEAD}(?:${CUT_BODY})${CUT_TAIL}$`, 'i').test(text);
 }
 
+const CN_VALUE = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+
+/** 中文数字转 0~100 的数值，只处理直播里常见的「十 / 十五 / 三十 / 一百」。 */
+function chineseToNumber(word) {
+  if (!word) return null;
+  if (word === '十') return 10;
+  if (word === '一百') return 100;
+  if (/^[零一二两三四五六七八九]$/.test(word)) return CN_VALUE[word];
+  const ten = word.match(/^([一二两三四五六七八九])?十([一二两三四五六七八九])?$/);
+  if (ten) return (ten[1] ? CN_VALUE[ten[1]] : 1) * 10 + (ten[2] ? CN_VALUE[ten[2]] : 0);
+  const hundred = word.match(/^([一二两三四五六七八九])百$/);
+  if (hundred) return CN_VALUE[hundred[1]] * 100;
+  return null;
+}
+
+/** 取「音量调到五十」里的中文数字音量；没有明确的调音量动作不匹配，避免误伤「小一点」「第一」等说法。 */
+function chineseVolumeValue(text) {
+  const hasSetVerb = /(?:调到|调成|调整到|设置为|设为|改成|改到|开到|放到|拨到|打到)/.test(text) || /%|％/.test(text);
+  if (!hasSetVerb) return null;
+  const percentWord = text.match(/百分之([零一二两三四五六七八九十百]+)/);
+  if (percentWord) {
+    const value = chineseToNumber(percentWord[1]);
+    if (value !== null) return value;
+  }
+  for (const match of text.matchAll(/[零一二两三四五六七八九十百]+/g)) {
+    const before = text[match.index - 1] || '';
+    const after = text[match.index + match[0].length] || '';
+    if (/[第初点]/.test(before) || /[半倍点下些分秒时个次遍之]/.test(after)) continue;
+    const value = chineseToNumber(match[0]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
 /**
  * 识别音乐音量指令。
- * 支持：音量调到40 / 声音30% / 声音大点 / 小点声 / 音量拉满 / 音量调到最小 / 音量加10 等。
+ * 支持：音量调到40 / 声音30% / 音量调到五十 / 声音大点 / 小点声 / 音量拉满 / 音量调到最小 / 音量加10 等。
  * @returns {{action:'set'|'up'|'down'|'max'|'min', volume?:number, step?:number}|null}
  */
 export function parseVolumeIntent(content) {
@@ -151,14 +185,14 @@ export function parseVolumeIntent(content) {
     return { action: /减|调低/.test(relative[0]) ? 'down' : 'up', step: Number(relative[1]) };
   }
 
+  const hasContext =
+    /(?:音量|声音|音乐)/.test(text) ||
+    /(?:调到|调成|调整到|设置为|设为|改成|改到|开到|放到)/.test(text) ||
+    /%|％/.test(text);
   const numeric = text.match(/(\d{1,3})(?:%|％)?/);
-  if (numeric) {
-    const hasContext =
-      /(?:音量|声音|音乐)/.test(text) ||
-      /(?:调到|调成|调整到|设置为|设为|改成|改到|开到|放到)/.test(text) ||
-      /%|％/.test(text);
-    if (hasContext) return { action: 'set', volume: Number(numeric[1]) };
-  }
+  if (numeric && hasContext) return { action: 'set', volume: Number(numeric[1]) };
+  const chineseVolume = chineseVolumeValue(text);
+  if (chineseVolume !== null) return { action: 'set', volume: chineseVolume };
 
   const hasMusicWord = /(?:音量|声音|音乐|歌|曲)/.test(text);
   if (!hasMusicWord && !/(?:大声|小声|小点声|大点声|响一点|轻一点)/.test(text)) return null;

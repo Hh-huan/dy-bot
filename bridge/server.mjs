@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { createSongManager } from './song.mjs';
 import { createMemoryStore } from './memory.mjs';
 import { createUserLedger } from './userLedger.mjs';
+import { ensureVirtualCamera } from './obs.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PET_DIR = path.resolve(HERE, '../examples/pet');
@@ -29,7 +30,7 @@ const userLedger = createUserLedger({ file: path.resolve(HERE, 'user-ledger.json
 const APP_LOG_FILE = path.resolve(HERE, 'app.log');
 const APP_LOG_MAX = 5 * 1024 * 1024;
 const MAX_BODY = 1024 * 1024;
-export const BRIDGE_VERSION = '1.16.83';
+export const BRIDGE_VERSION = '1.16.85';
 // 演示页名单的有效期：预览页每 5s 续期一次，关闭后 15s 内失效，不影响真实直播
 const DEMO_ROSTER_TTL_MS = 15000;
 
@@ -738,6 +739,16 @@ if (isMain) {
   console.log(`参考桌宠：http://${info.host}:${info.port}/pet`);
   console.log(`直播背景板：http://${info.host}:${info.port}/board`);
   console.log('只监听本机，关闭此窗口即停止。');
+  // OBS 重启后虚拟摄像头会自己关掉，这里补一次，避免直播伴侣预览黑屏
+  const obsLog = (message) => {
+    console.log(`[OBS] ${message}`);
+    try {
+      appendFileSync(APP_LOG_FILE, `${new Date().toISOString()} [info] ${message} | OBS 虚拟摄像头\n`, 'utf8');
+    } catch {
+      /* 写盘失败不影响主流程 */
+    }
+  };
+  ensureVirtualCamera({ log: obsLog }).catch(() => {});
   const shutdown = async () => {
     await bridge.stop();
     process.exit(0);

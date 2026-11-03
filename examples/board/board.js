@@ -1647,7 +1647,7 @@ async function publishBubbleRoster() {
 
 /* ---------- 气泡队列管理（每 60 秒补充 free 气泡，付费气泡优先替换最早的 free） ---------- */
 const BUBBLE_QUEUE_KEY = 'board:bubble-queue:v1';
-const BUBBLE_QUEUE_VERSION = '1.16.137';
+const BUBBLE_QUEUE_VERSION = '1.16.138';
 const BUBBLE_QUEUE_INTERVAL_MS = 60000;
 const VIEWER_POOL_MAX = 200;
 const VIEWER_POOL_TTL_MS = 5 * 60 * 1000;

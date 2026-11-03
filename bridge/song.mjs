@@ -761,6 +761,7 @@ export function createSongManager(options = {}) {
     startupTimer: null,
     externalTimer: null,
     externalNow: null,
+    externalMismatch: 0,
     externalPolling: false,
     recommendPool: [],
     recommendIndex: 0,
@@ -938,6 +939,7 @@ export function createSongManager(options = {}) {
         const previous = state.externalNow;
         if (!next) {
           state.externalNow = null;
+          state.externalMismatch = 0;
           return;
         }
         if (
@@ -947,6 +949,14 @@ export function createSongManager(options = {}) {
           previous.app !== next.app
         ) {
           state.externalNow = next;
+        }
+        // 当前曲可能已经播完、被手动切走，或者 QQ 自己跳到了下一首：
+        // 连续两轮对不上就把记录清掉，背景板直接显示 QQ 的实际播放
+        if (currentPlaybackMismatch()) {
+          state.externalMismatch = (Number(state.externalMismatch) || 0) + 1;
+          if (state.externalMismatch >= 2) dropStaleCurrent();
+        } else {
+          state.externalMismatch = 0;
         }
       },
     );
@@ -962,6 +972,34 @@ export function createSongManager(options = {}) {
     if (!state.current) return 0;
     if (state.paused) return state.elapsed;
     return state.elapsed + Math.max(0, now() - state.startedAt);
+  }
+
+  /**
+   * 记录里的当前曲是否已经和 QQ 实际播放对不上。
+   * 只比对 QQ 来源的歌曲；本地播放（背景板 <audio>）不参与，
+   * 刚开播 6 秒内也跳过，避免 QQ 窗口标题还没刷新时误判。
+   */
+  function currentPlaybackMismatch() {
+    const current = state.current;
+    const external = state.externalNow;
+    if (!current || !external) return false;
+    if (current.playMode === 'local' || current.source !== 'qq') return false;
+    if (!/qq/i.test(String(external.app || ''))) return false;
+    if (currentElapsed() < 6000) return false;
+    return !songMatches(external, current.title, current.artist);
+  }
+
+  /** 清掉已经没在播的当前曲，并让队列尽快接上，展示以 QQ 实际播放为准 */
+  function dropStaleCurrent() {
+    if (!state.current) return false;
+    state.current = null;
+    state.paused = false;
+    state.elapsed = 0;
+    state.externalMismatch = 0;
+    state.lastError = '';
+    publish('external_sync');
+    if (state.queue.length) scheduleNext(5000);
+    return true;
   }
 
   function publish(kind = 'update') {
@@ -1247,6 +1285,10 @@ export function createSongManager(options = {}) {
       };
     }
 
+    // 点歌前先对账：记录里的“正在播放”可能已经结束或被手动切走，
+    // 不清掉的话会把没在播的歌说成“正在播放中”
+    if (currentPlaybackMismatch()) dropStaleCurrent();
+
     const duplicate = [state.current, ...state.queue].find(
       (item) => item && sameSongEntry(item, song) && (item === state.current || !item.recommend),
     );
@@ -1281,14 +1323,6 @@ export function createSongManager(options = {}) {
       if (state.current) state.queue.unshift(state.current);
       state.queue.unshift(entry);
       const played = await playNext('test', true);
-      if (played && played.ok === false) {
-        return { ok: false, error: played.error || '播放失败', song: entry };
-      }
-    } else if (state.current && state.current.recommend && config.autoPlay !== false) {
-      // 每日推荐只是填空：一有人点歌就立刻让位，不占观众的点歌时间。
-      state.queue = state.queue.filter((item) => item.requestId !== entry.requestId);
-      state.queue.unshift(entry);
-      const played = await playNext('request', true);
       if (played && played.ok === false) {
         return { ok: false, error: played.error || '播放失败', song: entry };
       }

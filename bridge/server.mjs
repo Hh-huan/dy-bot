@@ -33,7 +33,7 @@ const MAX_BODY = 1024 * 1024;
 // 桌宠语音：扩展把云端 TTS 合成好的音频推进来，背景板按 id 取走播放
 const MAX_VOICE_BYTES = 8 * 1024 * 1024;
 const VOICE_KEEP = 6;
-export const BRIDGE_VERSION = '1.16.137';
+export const BRIDGE_VERSION = '1.16.138';
 // 演示页名单的有效期：预览页每 5s 续期一次，关闭后 15s 内失效，不影响真实直播
 const DEMO_ROSTER_TTL_MS = 15000;
 

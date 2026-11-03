@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音直播弹幕助手（主播版）",
-  "version": "1.16.137",
+  "version": "1.16.138",
   "description": "读取你自己抖音直播间的评论与弹幕，按规则自动回复（主播模式，本地运行，可选 AI）。",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "sidePanel", "tabs"],

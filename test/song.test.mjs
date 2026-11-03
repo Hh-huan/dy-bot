@@ -434,7 +434,7 @@ test('桥接重启后点歌队列会从磁盘恢复', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-test('当前是每日推荐时，新点歌立刻替换推荐曲', async () => {
+test('当前是每日推荐时，新点歌先排队，等推荐曲播完再上台', async () => {
   const clock = { value: 11_000_000 };
   const recommendImpl = async () => [
     {
@@ -464,8 +464,14 @@ test('当前是每日推荐时，新点歌立刻替换推荐曲', async () => {
       cooldownSec: 0,
     });
     assert.equal(requested.ok, true);
+    // 推荐曲是真实接管的播放，点歌不再把它从画面上“切走”，先排队等它播完
+    assert.equal(manager.snapshot().current.title, '每日推荐曲');
+    assert.equal(manager.snapshot().queue[0].title, '稻香');
+    assert.equal(requested.position, 1);
+
+    clock.value += 1000;
+    assert.equal((await manager.skip()).ok, true);
     assert.equal(manager.snapshot().current.title, '稻香');
-    assert.equal(manager.snapshot().queue.length, 0);
     assert.equal(played.at(-1).title, '稻香');
   } finally {
     manager.dispose();

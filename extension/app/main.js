@@ -1924,6 +1924,8 @@ async function resolveSongIntentWithAi(event) {
 }
 
 function handleChatViaAi(event) {
+  // 你画我猜进行中：这条弹幕属于玩法输入；即使 AI 判定返回时已经收场，也不再补回复
+  if (drawState.active) return;
   resolveSongIntentWithAi(event)
     .then((handled) => {
       if (!handled) maybeAutoReply(event);
@@ -3106,6 +3108,8 @@ function maybeAutoReply(event) {
   if (!settings.replyEnabled) return;
   if (event.type !== 'chat') return;
   if (!event.content) return;
+  // 你画我猜进行中：弹幕是玩法输入，不进入规则回复 / AI 闲聊，避免收场后补发
+  if (drawState.active) return;
 
   const nowMs = Date.now();
   // 进房时抖音会补发历史弹幕，避免对几分钟前的消息自动回复
@@ -3239,6 +3243,8 @@ async function maybeAiReply(event) {
   const ai = state.settings.ai;
   if (!isLeader || !ai || !ai.enabled || state.aiBusy) return;
   if (event.type !== 'chat' || !event.content) return;
+  // 你画我猜进行中不发 AI 回复：这些弹幕都是猜词，不是闲聊
+  if (drawState.active) return;
   if (state.replyQueue.length >= Math.max(1, Number(state.settings.maxQueue) || 20)) return;
 
   if (!ai.apiKey) {
@@ -3265,6 +3271,8 @@ async function maybeAiReply(event) {
   const reason = canSendNow(state.ruleState, state.settings, { rule: aiRule, userId, nowMs });
   if (reason) return;
 
+  // 请求发出时的局号：等待期间开了新的一局，这条回复直接作废
+  const drawRunAtStart = drawRunId;
   state.aiBusy = true;
   reserveSend(state.ruleState, state.settings, { rule: aiRule, userId, nowMs });
   let queued = false;
@@ -3310,6 +3318,16 @@ async function maybeAiReply(event) {
     }
     addTokenUsage(result.tokens);
 
+    // 等待模型期间开了你画我猜：这条回复属于玩法之前的弹幕，不再发出去
+    if (drawRunAtStart !== drawRunId) {
+      log('info', '你画我猜已开局，丢弃开画前发出的 AI 回复，避免玩法期间和收场后补发');
+      return;
+    }
+    if (drawState.active) {
+      log('info', '你画我猜进行中，丢弃 AI 回复');
+      return;
+    }
+
     lastDshAiAt = Date.now();
     clearTimeout(dshChatTimer);
     dshChatTimer = 0;
@@ -3328,6 +3346,8 @@ async function maybeAiReply(event) {
       const isFirst = index === 0;
       const deliver = () => {
         if (!isLeader) return;
+        // 分段回复的定时器可能跨到下一局，同样按局号丢弃
+        if (drawRunAtStart !== drawRunId) return;
         dshBroadcast(text, { force: true, anim: true, duration: 10000 });
         speakDsh(text, { priority: SPEECH_PRIORITY.chat });
         postPet({
@@ -3706,6 +3726,8 @@ let drawLastRevealAt = 0;
 let drawRoundStartedAt = 0;
 let drawStarting = false;
 let drawLastStartAt = 0;
+/** 每开一局 +1：跨局作废还没返回的 AI 请求，避免收场后补发旧弹幕的回复 */
+let drawRunId = 0;
 let drawRecentWords = [];
 let drawScoresDay = '';
 const DRAW_SCORES_KEY = 'dy.drawGuessScores.v1';
@@ -3928,6 +3950,7 @@ async function startDrawGame(options = {}) {
       return { ok: false, error: '题库暂时没有可用的题' };
     }
     drawRecentWords = [...drawRecentWords, ...deck.map((word) => word.id)].slice(-12);
+    drawRunId += 1;
     drawLastStartAt = now;
     drawLastRevealAt = now;
     drawRoundStartedAt = now;
@@ -5089,12 +5112,15 @@ function handleDshEvent(event) {
 
   if (event.type === 'chat') {
     if (!cfg.chatBubble || !event.content) return;
+    // 你画我猜进行中，弹幕都进画板，不再让桌宠复读评论
+    if (drawState.active) return;
     const interval = Math.max(0, Number(cfg.chatBubbleIntervalSec) || 0) * 1000;
     if (interval > 0 && Date.now() - lastDshChatAt < interval) return;
     if (dshChatTimer) return;
     dshChatTimer = setTimeout(() => {
       dshChatTimer = 0;
       if (!state.settings.dshPet.enabled) return;
+      if (drawState.active) return;
       if (Date.now() - lastDshAiAt < 4000) return; // AI 马上会回复，不抢气泡
       if (Date.now() - lastDshBubbleAt < 4000) return; // 刚发过礼物/关注气泡，不覆盖
       lastDshChatAt = Date.now();

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createMemoryStore } from '../bridge/memory.mjs';
 import {
   buildCrossViewerDigest,
+  buildReunionLine,
   buildViewerDigest,
   buildViewerHistoryEntry,
   fallbackCrossReply,
@@ -13,6 +14,7 @@ import {
   fitMemoryReply,
   hasViewerMemory,
   isMemoryQuestion,
+  parseViewerNote,
   recordViewerEvent,
   recordViewerSong,
   userFollowedAnchor,
@@ -273,6 +275,128 @@ test('跨直播记忆：观众摘要与兜底回答', () => {
   const reply = fallbackCrossReply(entry, '小明');
   assert.match(reply, /晴天/);
   assert.ok(Array.from(reply).length >= 20 && Array.from(reply).length <= 50, reply);
+});
+
+test('跨直播记忆：存档带上点歌 / 送礼 / 点赞明细', () => {
+  const record = {
+    key: 'u1',
+    name: '小明',
+    id: 'u1',
+    chats: ['今天好开心'],
+    gifts: [
+      { name: '小心心', count: 2 },
+      { name: '小心心', count: 1 },
+      { name: '大啤酒', count: 1 },
+    ],
+    songs: [
+      { title: '晴天', artist: '周杰伦' },
+      { title: '七里香', artist: '周杰伦' },
+    ],
+    followedAt: 0,
+    likes: 12,
+    lastSeen: 123,
+  };
+  const entry = buildViewerHistoryEntry(record);
+  assert.deepEqual(entry.songs.map((song) => song.title), ['晴天', '七里香']);
+  assert.deepEqual(entry.gifts, [
+    { name: '小心心', count: 3 },
+    { name: '大啤酒', count: 1 },
+  ]);
+  assert.equal(entry.likes, 12);
+  assert.equal(entry.lastChat, '今天好开心');
+  assert.equal(entry.lastSeen, 123);
+});
+
+test('进场重逢：说出上次点歌和送过的礼物', () => {
+  const viewer = {
+    songs: [{ title: '晴天' }],
+    gifts: [{ name: '小心心', count: 3 }],
+    likes: 12,
+    actions: ['关注'],
+  };
+  const line = buildReunionLine({ viewer, nickname: '小明' });
+  assert.equal(line, '@小明，你又来看鲸鱼娘啦！上次你点了《晴天》，还送了3个小心心，我记得你哦！');
+});
+
+test('进场重逢：旧版记忆从 note 解析点歌 / 送礼 / 点赞', () => {
+  const note = '点过《月半小夜曲》、送过小心心';
+  assert.deepEqual(parseViewerNote(note), { song: '月半小夜曲', gift: '小心心', likes: 0, followed: false });
+  const line = buildReunionLine({ viewer: { name: '小明', note }, nickname: '小明' });
+  assert.match(line, /上次你点了《月半小夜曲》，还送了小心心/);
+
+  const likesLine = buildReunionLine({ viewer: { note: '点过94个赞' }, nickname: '小明' });
+  assert.match(likesLine, /上次你给我点了94个赞/);
+});
+
+test('进场重逢：只有关注 / 没有记录时退回通用欢迎语', () => {
+  const followed = buildReunionLine({ viewer: { actions: ['关注'] }, nickname: '小美' });
+  assert.match(followed, /上次你关注了我/);
+
+  const none = buildReunionLine({ viewer: null, nickname: '新朋友' });
+  assert.equal(none, '@新朋友，你又来看鲸鱼娘啦！我记得你哦！');
+
+  const noViewer = buildReunionLine({ nickname: '老王' });
+  assert.equal(noViewer, '@老王，你又来看鲸鱼娘啦！我记得你哦！');
+});
+
+test('进场重逢：整句不超过 72 字，不会撑爆气泡', () => {
+  const viewer = {
+    songs: [{ title: '一首名字特别特别特别长的歌曲名称测试用' }],
+    gifts: [{ name: '超级无敌限量纪念版小心心', count: 99 }],
+    likes: 12345,
+  };
+  const line = buildReunionLine({ viewer, nickname: '一二三四五六七八九十一二三四五六七八九十' });
+  assert.ok(Array.from(line).length <= 72, line);
+  assert.match(line, /又来看鲸鱼娘啦/);
+  assert.match(line, /我记得你哦/);
+});
+
+test('跨直播记忆：行为明细能落盘，同场次合并不重复累加', async () => {
+  const { store, file, cleanup } = tempStore();
+  try {
+    await store.add({
+      text: '第一份总结',
+      sessionKey: 'room:1',
+      viewers: [
+        {
+          key: 'u1',
+          name: '小明',
+          actions: ['送礼'],
+          note: '送过小心心',
+          songs: [{ title: '晴天', artist: '周杰伦' }],
+          gifts: [{ name: '小心心', count: 3 }],
+          likes: 5,
+          lastChat: '好听',
+        },
+      ],
+    });
+    await store.add({
+      text: '第二份总结',
+      sessionKey: 'room:1',
+      viewers: [
+        {
+          key: 'u1',
+          name: '小明',
+          actions: ['点歌'],
+          songs: [{ title: '七里香' }],
+          gifts: [{ name: '小心心', count: 2 }],
+        },
+      ],
+    });
+    const listed = await store.list();
+    assert.equal(listed.memories.length, 1);
+    const viewer = listed.memories[0].viewers[0];
+    assert.deepEqual(viewer.songs.map((song) => song.title), ['七里香']);
+    assert.deepEqual(viewer.gifts, [{ name: '小心心', count: 2 }]);
+    assert.equal(viewer.likes, 5);
+    assert.equal(viewer.lastChat, '好听');
+
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(raw.memories[0].viewers[0].lastChat, '好听');
+    assert.match(buildReunionLine({ viewer, nickname: '小明' }), /七里香/);
+  } finally {
+    cleanup();
+  }
 });
 
 test('单场记忆：AI 回答会约束在 20~50 字，兜底也满足', () => {

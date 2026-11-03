@@ -1,4 +1,5 @@
 /** 单场直播的观众记忆：点歌、发言（最多 20 条）、送礼，用于回答“还记得我吗”。 */
+import { intimacySpokenLevel, levelForPoints } from './intimacy.js';
 
 export const MEMORY_MIN_CHARS = 20;
 export const MEMORY_MAX_CHARS = 50;
@@ -6,6 +7,10 @@ export const MEMORY_MAX_CHARS = 50;
 const MAX_CHATS = 20;
 const MAX_GIFTS = 20;
 const MAX_SONGS = 10;
+// 跨直播记忆只留最近几次具体行为，用于进场时的「老朋友重逢」彩蛋
+const MAX_DETAIL_SONGS = 3;
+const MAX_DETAIL_GIFTS = 3;
+export const REUNION_MAX_CHARS = 72;
 
 const MEMORY_QUESTION_RE =
   /(?:还)?记(?:不)?得(?:我|人家)|记不记得(?:我|人家)|认识(?:我|人家)|知道(?:我|人家)是谁|(?:我|人家)是谁|对(?:我|人家)有印象|你(?:对我|对人家)?有印象/;
@@ -21,7 +26,7 @@ export function isMemoryQuestion(content) {
   return MEMORY_QUESTION_RE.test(text);
 }
 
-/** 至少要有一条点歌 / 发言 / 送礼 / 关注 / 点赞，才算有这个观众的记录。 */
+/** 至少要有一条点歌 / 发言 / 送礼 / 关注 / 点赞 / 亲密度，才算有这个观众的记录。 */
 export function hasViewerMemory(record) {
   if (!record) return false;
   return Boolean(
@@ -29,7 +34,9 @@ export function hasViewerMemory(record) {
       (record.gifts && record.gifts.length) ||
       (record.songs && record.songs.length) ||
       Number(record.followedAt) ||
-      Number(record.likes),
+      Number(record.likes) ||
+      // 亲密度只给互动过的观众累计，进场签到也要能跨场次保留
+      Number(record.intimacy && record.intimacy.points),
   );
 }
 
@@ -170,7 +177,22 @@ export function fallbackMemoryReply(record, nickname = '观众') {
   return fitMemoryReply(text, name);
 }
 
-/** 单场结束时写入跨直播记忆的观众简单信息。 */
+/** 送礼按礼物名汇总：同名连击数量累加，只留最近几种。 */
+function summarizeGifts(gifts) {
+  if (!Array.isArray(gifts)) return [];
+  const byName = new Map();
+  for (const item of gifts) {
+    if (!item || !item.name) continue;
+    const name = trimText(item.name, 20);
+    if (!name) continue;
+    byName.set(name, (byName.get(name) || 0) + Math.max(1, Number(item.count) || 1));
+  }
+  return [...byName.entries()]
+    .slice(-MAX_DETAIL_GIFTS)
+    .map(([name, count]) => ({ name, count }));
+}
+
+/** 单场结束时写入跨直播记忆的观众信息：一句话印象 + 具体行为明细。 */
 export function buildViewerHistoryEntry(record) {
   if (!record) return null;
   const actions = [];
@@ -186,12 +208,31 @@ export function buildViewerHistoryEntry(record) {
   if (gift) noteParts.push(`送过${gift.name}`);
   if (!noteParts.length && Number(record.likes)) noteParts.push(`点过${record.likes}个赞`);
   if (!noteParts.length && Number(record.followedAt)) noteParts.push('关注过鲸鱼娘');
+  // 高亲密度观众在跨直播记忆里带上级别，AI 下次直播会更自然地用亲近的口吻招呼
+  const intimacyPoints = Math.max(0, Number(record.intimacy && record.intimacy.points) || 0);
+  const intimacyInfo = levelForPoints(intimacyPoints);
+  if (intimacyInfo.level >= 5) {
+    noteParts.unshift(`亲密度${intimacySpokenLevel(intimacyInfo.level)}${intimacyInfo.title}`);
+  }
+  const songs = (record.songs || [])
+    .slice(-MAX_DETAIL_SONGS)
+    .map((item) => ({ title: trimText(item.title, 40), artist: trimText(item.artist, 30) }))
+    .filter((item) => item.title);
+  const lastChat = record.chats && record.chats.length ? trimText(record.chats[record.chats.length - 1], 30) : '';
   return {
     key: String(record.key || record.id || record.name || ''),
     name: String(record.name || ''),
     id: String(record.id || ''),
     actions,
     note: noteParts.join('、').slice(0, 60),
+    songs,
+    gifts: summarizeGifts(record.gifts),
+    likes: Math.max(0, Number(record.likes) || 0),
+    lastChat,
+    lastSeen: Number(record.lastSeen) || 0,
+    intimacyPoints,
+    intimacyLevel: intimacyInfo.level,
+    intimacyTitle: intimacyInfo.title,
   };
 }
 
@@ -213,4 +254,69 @@ export function fallbackCrossReply(viewer, nickname = '观众') {
     ? `${name}，我记得你呀，之前直播${note}，欢迎再来看鲸鱼娘，常来玩哦～`
     : `${name}，我记得你之前来过直播间呀，欢迎再来看鲸鱼娘，常来玩哦～`;
   return fitMemoryReply(text, name);
+}
+
+/** 旧版跨直播记忆只有一句 note，这里把点歌 / 送礼 / 点赞 / 关注解析出来。 */
+export function parseViewerNote(note) {
+  const text = String(note || '');
+  const result = { song: '', gift: '', likes: 0, followed: false };
+  const song = text.match(/点过《([^》]{1,40})》/);
+  if (song) result.song = song[1].trim();
+  const gift = text.match(/送过([^、，,；;（(]{1,20})/);
+  if (gift) result.gift = gift[1].trim();
+  const likes = text.match(/点过(\d{1,7})个赞/);
+  if (likes) result.likes = Number(likes[1]) || 0;
+  result.followed = /关注过/.test(text);
+  return result;
+}
+
+/** 把上次直播的具体行为拼成 1~2 句细节，优先点歌 + 送礼。 */
+function reunionSegments(viewer) {
+  if (!viewer) return [];
+  const legacy = parseViewerNote(viewer.note);
+  const songs = Array.isArray(viewer.songs) && viewer.songs.length
+    ? viewer.songs
+    : legacy.song
+      ? [{ title: legacy.song }]
+      : [];
+  const gifts = Array.isArray(viewer.gifts) && viewer.gifts.length
+    ? viewer.gifts
+    : legacy.gift
+      ? [{ name: legacy.gift, count: 0 }]
+      : [];
+  const segments = [];
+  const song = songs[songs.length - 1];
+  if (song && song.title) segments.push(`点了《${trimText(song.title, 18)}》`);
+  const gift = gifts[gifts.length - 1];
+  if (gift && gift.name) {
+    const count = Math.max(0, Number(gift.count) || 0);
+    const amount = count > 1 ? `${count}个` : '';
+    segments.push(`${segments.length ? '还' : ''}送了${amount}${trimText(gift.name, 12)}`);
+  }
+  const likes = Math.max(0, Number(viewer.likes) || 0) || legacy.likes;
+  if (segments.length < 2 && likes > 0) {
+    segments.push(`${segments.length ? '还' : ''}给我点了${likes}个赞`);
+  }
+  const followed = Boolean(legacy.followed) || (Array.isArray(viewer.actions) && viewer.actions.includes('关注'));
+  if (!segments.length && followed) segments.push('关注了我');
+  const chat = trimText(viewer.lastChat, 12);
+  if (!segments.length && chat) segments.push(`说过「${chat}」`);
+  return segments.slice(0, 2);
+}
+
+/**
+ * 老观众再次进场时的「老朋友重逢」欢迎语：
+ * 优先说出上次直播点了什么歌、送了多少礼物，没有明细时退回通用欢迎。
+ */
+export function buildReunionLine({ viewer, nickname = '观众', maxChars = REUNION_MAX_CHARS } = {}) {
+  const name = String(nickname || '').trim() || '观众';
+  const head = `@${name}，你又来看鲸鱼娘啦！`;
+  const tail = '，我记得你哦！';
+  let detail = '';
+  for (const segment of reunionSegments(viewer)) {
+    const next = detail ? `${detail}，${segment}` : segment;
+    if (Array.from(`${head}上次你${next}${tail}`).length > maxChars) break;
+    detail = next;
+  }
+  return detail ? `${head}上次你${detail}${tail}` : `${head}我记得你哦！`;
 }

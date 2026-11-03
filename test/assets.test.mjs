@@ -54,13 +54,41 @@ test('JS 里通过 #id 引用的元素都存在于 HTML', () => {
   assert.deepEqual([...missing], [], `HTML 中找不到这些 id：\n${[...missing].join('\n')}`);
 });
 
-test('JS 的相对 import 路径都有效', () => {
+/** 收集一个模块对外导出的名字，用来校验 import { ... } 不会引用不存在的导出。 */
+function exportedNames(file) {
+  const source = readFileSync(file, 'utf8');
+  const names = new Set();
+  for (const match of source.matchAll(/export\s+(?:async\s+)?(?:function|const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)) {
+    names.add(match[1]);
+  }
+  for (const match of source.matchAll(/export\s*\{([^}]*)\}/g)) {
+    for (const part of match[1].split(',')) {
+      const cleaned = part.trim();
+      if (!cleaned) continue;
+      const alias = cleaned.split(/\s+as\s+/);
+      names.add((alias[1] || alias[0]).trim());
+    }
+  }
+  return names;
+}
+
+test('JS 的相对 import 路径都有效，且引用的导出都存在', () => {
   const missing = [];
   for (const file of jsFiles) {
     const source = readFileSync(file, 'utf8');
     for (const match of source.matchAll(/(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]/g)) {
       const target = path.resolve(path.dirname(file), match[1]);
       if (!existsSync(target)) missing.push(`${path.relative(ROOT, file)} → ${match[1]}`);
+    }
+    for (const match of source.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"](\.[^'"]+)['"]/g)) {
+      const target = path.resolve(path.dirname(file), match[2]);
+      if (!existsSync(target)) continue;
+      const names = exportedNames(target);
+      for (const raw of match[1].split(',')) {
+        const name = raw.trim().split(/\s+as\s+/)[0].trim();
+        if (!name || name === 'default' || names.has(name)) continue;
+        missing.push(`${path.relative(ROOT, file)} → ${match[2]} 缺少导出 ${name}`);
+      }
     }
   }
   assert.deepEqual(missing, []);

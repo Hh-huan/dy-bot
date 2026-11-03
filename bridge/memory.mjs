@@ -25,6 +25,28 @@ function sanitizeViewers(viewers) {
         ? item.actions.map((action) => String(action || '').slice(0, 6)).slice(0, 6)
         : [],
       note: String((item && item.note) || '').slice(0, 60),
+      // 「老朋友重逢」欢迎语要说出上次点了什么歌、送了多少礼物
+      songs: Array.isArray(item && item.songs)
+        ? item.songs
+            .slice(-3)
+            .map((song) => ({
+              title: String((song && song.title) || '').slice(0, 40),
+              artist: String((song && song.artist) || '').slice(0, 30),
+            }))
+            .filter((song) => song.title)
+        : [],
+      gifts: Array.isArray(item && item.gifts)
+        ? item.gifts
+            .slice(-3)
+            .map((gift) => ({
+              name: String((gift && gift.name) || '').slice(0, 20),
+              count: Math.max(1, Math.min(9999, Number(gift && gift.count) || 1)),
+            }))
+            .filter((gift) => gift.name)
+        : [],
+      likes: Math.max(0, Math.min(9999999, Number(item && item.likes) || 0)),
+      lastChat: String((item && item.lastChat) || '').slice(0, 30),
+      lastSeen: Math.max(0, Number(item && item.lastSeen) || 0),
     }))
     .filter((item) => item.key || item.name);
 }
@@ -47,6 +69,12 @@ function mergeViewers(prev, next) {
       ...current,
       actions: [...new Set([...current.actions, ...item.actions])],
       note: String(item.note || '').length > String(current.note || '').length ? item.note : current.note,
+      // 同场次多次存档时行为明细会重叠，取更完整的一份而不是累加，避免礼物数量翻倍
+      songs: current.songs && current.songs.length ? current.songs : item.songs || [],
+      gifts: current.gifts && current.gifts.length ? current.gifts : item.gifts || [],
+      likes: Math.max(Number(current.likes) || 0, Number(item.likes) || 0),
+      lastChat: current.lastChat || item.lastChat || '',
+      lastSeen: Math.max(Number(current.lastSeen) || 0, Number(item.lastSeen) || 0),
     });
   }
   return [...merged.values()];

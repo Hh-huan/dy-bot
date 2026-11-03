@@ -7,8 +7,6 @@
  * 配置（可选）：bridge/obs.json，不存在时用下面的默认值。
  *   { "enabled": true, "port": 4455, "password": "", "attempts": 3, "retryDelayMs": 5000 }
  * 也支持环境变量 OBS_WS_PORT / OBS_WS_PASSWORD 覆盖。
- *
- * 密码填 OBS 里「工具 → WebSocket 服务器设置」显示的那串；没开鉴权就留空。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -146,9 +144,6 @@ export async function ensureVirtualCamera({ log = () => {} } = {}) {
     }
     lastError = result.error || 'OBS 虚拟摄像头未能开启';
     if (attempt < config.attempts) await sleep(config.retryDelayMs);
-  }
-  if (!config.password) {
-    lastError += '；如果 OBS 开了 WebSocket 鉴权，把密码填到 bridge/obs.json 或环境变量 OBS_WS_PASSWORD';
   }
   log(`OBS 虚拟摄像头未开启：${lastError}`);
   return { ok: false, error: lastError };

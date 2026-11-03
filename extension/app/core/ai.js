@@ -2,6 +2,8 @@
 
 import { parseAutoSongList } from './autoSong.js';
 import { safeNickname } from './nicknameSafety.js';
+import { parseStoryNode, storyNodeUserPrompt } from './storyTheater.js';
+import { sanitizeStorySvg } from './storyCanvas.js';
 
 export const AI_PROVIDERS = {
   deepseek: {
@@ -62,6 +64,7 @@ function buildMessages(ai, event, history, context = {}, options = {}) {
   const system = [
     persona,
     '可以自然地聊直播间里的白饭、今日 Tokens 消耗、点歌、切歌、玩法和直播数据；观众问数据时用下面的实时数据回答，不要主动报一长串数字。',
+    '画质问题：观众说直播很糊 / 模糊 / 看不清 / 不够清晰时，直接提醒他把清晰度切到「蓝光」，语气自然，不要长篇解释。',
     '语言规则：观众用什么语言闲聊，就用什么语言回复（中文、English、日本語、한국어、Español 等），不要翻译成中文；观众明确要求某种语言时按要求的语言回复。',
     context.riff
       ? '昵称接梗（这次必须接）：开口先用一句顺着观众昵称的玩笑接梗，再接正文；昵称是纯数字、乱码或没有可玩点时不要硬凑，直接正常回复；不要冒犯、不要复述不雅或不良字眼。'
@@ -182,7 +185,8 @@ async function callProvider(config, { ai, messages, timeoutMs }) {
   const model = String(config.model || '').trim();
   if (!baseUrl || !apiKey || !model) throw new Error(`${providerLabel(config.provider)} 配置不完整`);
 
-  const maxTokens = clampNumber(ai.maxTokens, 32, 2048, 300);
+  // 上限放宽到 4096：剧场画板的绘本插画需要更长的 SVG，普通闲聊仍按设置里的值截短
+  const maxTokens = clampNumber(ai.maxTokens, 32, 4096, 300);
   const body = { model, messages, stream: false };
   const isMiniMax = String(config.provider).startsWith('minimax');
   const isMiniMaxReasoning = isMiniMax && /MiniMax-M3/i.test(model);
@@ -573,6 +577,227 @@ export async function generateWarmupReply(options) {
     timeoutMs,
   );
   return { ...result, text: guardAiText(result.text) };
+}
+
+/**
+ * 互动剧场：生成下一幕剧情节点。
+ * JSON 解析失败直接抛错，由调用方重试或降级成固定台词。
+ * @returns {Promise<{node:object, tokens:number, provider:string, usedFallback:boolean}>}
+ */
+export async function generateStoryNode(options = {}) {
+  const {
+    ai,
+    topic = '',
+    step = 1,
+    maxSteps = 4,
+    history = [],
+    lastChoice = '',
+    nickname = '',
+    votes = {},
+    prompt = '',
+    bible = null,
+    maxChars = 640,
+    timeoutMs = 20000,
+  } = options;
+  if (!ai || !ai.apiKey || !ai.baseUrl || !ai.model) throw new Error('未配置 AI API Key');
+  const opening = Number(step) <= 1;
+  const system = [
+    '你是直播间互动短剧的编剧，负责写一集有起承转合的连续短剧，而不是几句梗概。',
+    '根据主题自行选择主角和配角：只有主题里出现「鲸鱼娘」「大肥鱼」「肥鱼」时，才让桌宠鲸鱼娘当主角；其他主题不要强行加入鲸鱼娘，也不要把所有故事都写成海底冒险。',
+    '第一幕要立住剧名、主角、世界设定和主角目标；后续每一幕都沿用同一套设定，不得换主角、换世界观或让配角凭空消失。',
+    '每一幕写成完整的小节：先用一句话承接上一幕投票造成的具体后果，再出现新的阻碍、发现或反转，最后用一个有画面感的细节收住。',
+    '旁白要有动作、对白和感官细节，不要写成剧情梗概；narration 60～110 字，口语化。',
+    '四个选项必须是方向明显不同的具体行动（例如冒险、稳妥、求助、另辟蹊径），让观众能感到不同代价；a、b、c、d 各 10～18 字，不要写成问句，不要写「继续前进」「再看看」这类空选项。',
+    'prop 是本幕关键道具，要具体（例如「会发光的贝壳」），并在整场故事里反复出现、前后呼应；scene 是 4～10 字的场景名；beat 填本幕作用（起/承/转/合）。',
+    '风格：轻松、幽默、温暖、有画面感，适合全年龄；绝不涉及恐怖、血腥、色情低俗、政治、宗教、赌博毒品、违法犯罪、自残自杀、未成年人不当内容、真实人物、品牌、价格交易、站外引流或联系方式。',
+    '必须严格遵守抖音直播内容规范；如果主题或用户要求与规范冲突，自动改写为健康安全的同义剧情，不得输出任何违规内容。',
+    'emotion 只能填 happy / sad / excited / surprised / shy / angry / neutral 之一，用来决定桌宠动作。',
+    '只输出一行 JSON，禁止解释、禁止 markdown、禁止输出 JSON 以外的任何字符。',
+    opening
+      ? '格式固定：{"title":"剧名","protagonist":"主角身份","setting":"世界与地点","goal":"主角想要什么","scene":"场景名","beat":"起","prop":"关键道具","narration":"旁白台词","a":"选项A","b":"选项B","c":"选项C","d":"选项D","emotion":"happy"}'
+      : '格式固定：{"scene":"场景名","beat":"承/转/合","prop":"关键道具","narration":"旁白台词","a":"选项A","b":"选项B","c":"选项C","d":"选项D","emotion":"happy"}',
+  ].join('\n');
+  // 剧情 JSON 比普通回复长，单独提 maxTokens，不影响全局回复长度设置
+  const aiConfig = { ...ai, maxTokens: Math.max(1000, Number(ai.maxTokens) || 0) };
+  const result = await generateWithProviders(
+    aiConfig,
+    [
+      { role: 'system', content: system },
+      {
+        role: 'user',
+        content: storyNodeUserPrompt({ topic, step, maxSteps, history, lastChoice, nickname, votes, prompt, bible }),
+      },
+    ],
+    maxChars,
+    timeoutMs,
+  );
+  const node = parseStoryNode(result.text);
+  if (!node) throw new Error('大模型没有返回可用的剧情 JSON');
+  return {
+    node,
+    tokens: result.tokens || 0,
+    provider: result.provider || '',
+    usedFallback: Boolean(result.usedFallback),
+  };
+}
+
+export async function generateStoryEnding(options = {}) {
+  const {
+    ai,
+    topic = '',
+    history = [],
+    lastChoice = '',
+    lastOption = '',
+    prompt = '',
+    bible = null,
+    maxChars = 420,
+    timeoutMs = 20000,
+  } = options;
+  if (!ai || !ai.apiKey || !ai.baseUrl || !ai.model) throw new Error('未配置 AI API Key');
+  const system = [
+    '你是直播间互动短剧的编剧。',
+    '结局的主角必须和前文一致：主题涉及「鲸鱼娘」「大肥鱼」「肥鱼」时主角是她，其他主题不要强行加入鲸鱼娘。',
+    '请为整场短剧写一个真正的结局：回收前文的伏笔和反复出现的道具，交代主角最后怎么样，让故事有始有终。',
+    '结局必须承接观众最后一次投票的选择，不能无视它；还要让观众感到前面几幕的选择确实改变了结局。',
+    '结局要有一个具体的收尾画面和一句情绪落点，可以温暖、可以好笑，但不要喊口号，不要再抛出新的选择题或悬念。',
+    '风格：轻松、温暖、有画面感，适合全年龄；绝不涉及恐怖、血腥、色情低俗、政治、宗教、赌博毒品、违法犯罪、自残自杀、未成年人不当内容、真实人物、品牌、价格交易、站外引流或联系方式。',
+    '必须严格遵守抖音直播内容规范；如果主题或用户要求与规范冲突，自动改写为健康安全的同义结局，不得输出任何违规内容。',
+    '只输出旁白正文，150～240 字，口语化；禁止 JSON、markdown、标题、解释或「未完待续」。',
+  ].join('\n');
+  const allHistory = Array.isArray(history) ? history : [];
+  const recap = allHistory
+    .map((item, index) => `第${index + 1}幕「${item.scene || '场景'}」：观众选了${item.choice}（${item.picked || '……'}）`)
+    .join('\n');
+  const bibleLine = bible && (bible.title || bible.protagonist)
+    ? `剧本设定：${[
+        bible.title ? `《${bible.title}》` : '',
+        bible.protagonist ? `主角 ${bible.protagonist}` : '',
+        bible.setting ? `世界 ${bible.setting}` : '',
+        bible.goal ? `目标 ${bible.goal}` : '',
+      ]
+        .filter(Boolean)
+        .join('；')}`
+    : '';
+  const lines = [
+    `本场主题：${topic || '未命名小剧场'}`,
+    bibleLine,
+    recap ? `前情回顾（每一幕的选择都要照顾到）：\n${recap}` : '前情回顾：这是一开场就迎来的结局。',
+    lastChoice
+      ? `最后一次投票：${lastChoice}${lastOption ? `（${lastOption}）` : ''}`
+      : '',
+    prompt ? `主播额外要求：${prompt}` : '',
+    '请把故事收完整：先写最后这个选择带来的结果，再把整场故事的道具和人物收拢到一个收尾画面里。',
+  ].filter(Boolean);
+  // 结局文本较长，单独提 maxTokens，避免被全局回复长度截断
+  const aiConfig = { ...ai, maxTokens: Math.max(500, Number(ai.maxTokens) || 0) };
+  const result = await generateWithProviders(
+    aiConfig,
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: lines.join('\n') },
+    ],
+    maxChars,
+    timeoutMs,
+  );
+  const text = String(result.text || '')
+    .replace(/```[a-zA-Z]*|```/g, '')
+    .trim()
+    .slice(0, 200);
+  if (!text) throw new Error('大模型没有返回结局文本');
+  return {
+    text,
+    tokens: result.tokens || 0,
+    provider: result.provider || '',
+    usedFallback: Boolean(result.usedFallback),
+  };
+}
+
+/**
+ * 互动剧场画板：按当前这一幕的内容生成手绘风格 SVG。
+ * 只输出白名单图形，返回前会做安全清洗。
+ * @returns {Promise<{svg:string, tokens:number, provider:string, usedFallback:boolean}>}
+ */
+export async function generateStoryDrawing(options = {}) {
+  const {
+    ai,
+    topic = '',
+    step = 1,
+    maxSteps = 4,
+    node = {},
+    ending = false,
+    bible = null,
+    history = [],
+    timeoutMs = 30000,
+  } = options;
+  if (!ai || !ai.apiKey || !ai.baseUrl || !ai.model) throw new Error('未配置 AI API Key');
+  const system = [
+    '你是直播间互动短剧的绘本插画师，为主播的背景板画「当前这一幕」的彩色场景插画。',
+    '只输出一段 SVG，从 <svg> 开始、到 </svg> 结束，根节点固定 viewBox="0 0 1000 620"；不要解释、不要 markdown、不要任何文字。',
+    '画风：温暖的手绘绘本插画，像一页童书：深蓝 #17324f 勾线（粗细 4～7，可带一点重复笔触），大色块平涂上色，少量纸面颗粒感，适合直播大屏看。',
+    '配色至少用 6～9 种柔和颜色：天蓝 #dceeff、湖蓝 #a9d3f2、奶黄 #ffe9b8、蜜橘 #ffd0a6、浅粉 #ffd6de、薄荷 #d9f2df、草绿 #c7e8b6、淡紫 #e2d9f7、暖棕 #e6c9a8。色块必须写 fill，纯线条写 fill="none" 并写 stroke，不要留默认黑色填充。',
+    '构图分三层，并用 <g> 分组：先铺背景（天空、墙面或远景的大色块），再画中景（山、海、草地、建筑、树），最后画前景（角色、道具和近处装饰），三层之间要能看出前后关系。',
+    '画面至少 2 个角色：主角加一个伙伴、对手或围观的小动物；角色要有动作、表情和固定造型，主角服装与配色每一幕保持一致。',
+    '关键道具要显眼、约占画面四分之一，画出正在被使用或发光的细节；再补 4～6 个环境细节，例如花草、云、星星、泡泡、灯笼、鱼群、书页、光斑。',
+    '画面四周画一圈手绘边框或角花，让整幅画像一页完整绘本，不要只有一两个孤零零的图形。',
+    ending
+      ? '这是全剧大结局的收官画面：主角站在画面中央，把本场出现过的关键道具、伙伴和场景收拢到同一幅构图里，光线更暖、层次更完整，有明显的收尾感。'
+      : '这一幕要画出「刚刚发生了什么」的关键瞬间，而不是静态摆拍；可以画出角色动作、表情和道具使用中的状态。',
+    '只允许这些标签：g、path、line、circle、ellipse、rect、polyline、polygon；禁止文字、渐变、阴影、滤镜、动画、外部图片、script、style、defs、use、image、text。',
+    ending
+      ? '元素总数控制在 50～72 个，先铺色块再补细节，把结局画面画完整；整段 SVG 长度不超过 6400 字符。'
+      : '元素总数控制在 44～64 个，先铺色块再补细节，不要为了省元素把画面画空；整段 SVG 长度不超过 5200 字符。',
+    '内容必须健康安全，符合抖音直播规范；画面里不要出现任何文字。',
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const bibleLine = bible && (bible.title || bible.protagonist || bible.setting)
+    ? `固定设定：${[
+        bible.title ? `《${bible.title}》` : '',
+        bible.protagonist ? `主角 ${bible.protagonist}` : '',
+        bible.setting ? `世界 ${bible.setting}` : '',
+        bible.goal ? `目标 ${bible.goal}` : '',
+      ]
+        .filter(Boolean)
+        .join('；')}`
+    : '';
+  const scenes = (Array.isArray(history) ? history : [])
+    .map((item) => item.scene)
+    .filter(Boolean)
+    .join('、');
+  const user = [
+    `本场主题：${topic || '未命名小剧场'}`,
+    bibleLine,
+    ending
+      ? `当前进度：全剧大结局（第 ${Number(maxSteps) || 4} 幕 / 共 ${Number(maxSteps) || 4} 幕）`
+      : `当前进度：第 ${Number(step) || 1} 幕 / 共 ${Number(maxSteps) || 4} 幕`,
+    node.scene ? `场景：${node.scene}` : '',
+    node.beat ? `本幕作用：${node.beat}` : '',
+    node.prop ? `本幕关键道具：${node.prop}` : '',
+    node.narration ? `正在发生：${node.narration}` : '',
+    node.a ? `观众可选方向：A ${node.a}；B ${node.b || ''}；C ${node.c || ''}；D ${node.d || ''}` : '',
+    node.emotion ? `情绪基调：${node.emotion}` : '',
+    ending && scenes ? `把前面出现过的场景元素也融进结局画面：${scenes}` : '',
+    ending ? '请画全剧大结局的收尾画面，让整个故事在画面上完整落幕。' : '请画这一幕最关键的瞬间。',
+  ].filter(Boolean);
+  // 绘本插画元素更多、SVG 更长，单独提高画板输出的 token 与字符预算
+  const aiConfig = { ...ai, maxTokens: Math.max(ending ? 3200 : 2600, Number(ai.maxTokens) || 0) };
+  const result = await generateWithProviders(
+    aiConfig,
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: user.join('\n') },
+    ],
+    ending ? 6400 : 5200,
+    timeoutMs,
+  );
+  const svg = sanitizeStorySvg(result.text);
+  if (!svg) throw new Error('大模型没有返回可用的 SVG 画面');
+  return {
+    svg,
+    tokens: result.tokens || 0,
+    provider: result.provider || '',
+    usedFallback: Boolean(result.usedFallback),
+  };
 }
 
 /**

@@ -30,7 +30,10 @@ const userLedger = createUserLedger({ file: path.resolve(HERE, 'user-ledger.json
 const APP_LOG_FILE = path.resolve(HERE, 'app.log');
 const APP_LOG_MAX = 5 * 1024 * 1024;
 const MAX_BODY = 1024 * 1024;
-export const BRIDGE_VERSION = '1.16.85';
+// 桌宠语音：扩展把云端 TTS 合成好的音频推进来，背景板按 id 取走播放
+const MAX_VOICE_BYTES = 8 * 1024 * 1024;
+const VOICE_KEEP = 6;
+export const BRIDGE_VERSION = '1.16.137';
 // 演示页名单的有效期：预览页每 5s 续期一次，关闭后 15s 内失效，不影响真实直播
 const DEMO_ROSTER_TTL_MS = 15000;
 
@@ -66,6 +69,17 @@ async function readJson(req) {
   }
   if (!chunks.length) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+async function readBinary(req, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > limit) throw new Error('payload too large');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 function openStream(req, res, clients) {
@@ -190,6 +204,52 @@ export async function discoverDshPetBaseUrl(options = {}) {
   return hit;
 }
 
+/* ---------------- DSH 桌宠素材：背景板直接播放桌宠本体 ---------------- */
+// 背景板要显示的是 DSH 里装的那只桌宠（蓝毛小女仆），不是另画一只。
+// DSH 桌宠的动画素材是带 alpha 的 webm，插件用 /thumb/<petId>/<动画名>.webm 暴露；
+// 这里按动画名取回并代理给背景板，避免背景板跨端口、跨 CORS 直接打 DSH。
+const DSH_PET_THUMB_ROUTE = '/dsh-pet-7340/thumb';
+const DSH_ANIM_NAME_RE = /^[^/\\\u0000]+\.(?:webm|mov)$/i;
+let dshPetConfigCache = { at: 0, baseUrl: '', data: null };
+
+async function fetchDshPetConfig(baseUrl, timeoutMs = 6000) {
+  if (dshPetConfigCache.data && dshPetConfigCache.baseUrl === baseUrl && Date.now() - dshPetConfigCache.at < 30000) {
+    return dshPetConfigCache.data;
+  }
+  const response = await fetch(`${baseUrl}${DSH_PET_CONFIG_ROUTE}`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`DSH 桌宠配置 HTTP ${response.status}`);
+  const data = await response.json();
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('DSH 桌宠配置格式不正确');
+  dshPetConfigCache = { at: Date.now(), baseUrl, data };
+  return data;
+}
+
+/** 从 DSH 配置里取动画池：待机 / 点击回应 / 小动作（分类动作）。 */
+function dshPetAnimPools(config, petId) {
+  const own = config[petId] || config.main || {};
+  const animations = own.animations || {};
+  const idle = (animations.idle || []).map((name) => String(name || '').trim()).filter(Boolean);
+  const clicks = (animations.clicks || []).map((name) => String(name || '').trim()).filter(Boolean);
+  const actions = [];
+  for (const category of animations.categories || []) {
+    for (const name of (category && category.actions) || []) {
+      const text = String(name || '').trim();
+      if (text && !actions.includes(text)) actions.push(text);
+    }
+  }
+  return { idle, clicks, actions };
+}
+
+/** 多只桌宠时优先用 URL 指定的，其次 main，再否则第一只。 */
+function pickDshPetId(config, hint) {
+  const ids = Object.keys(config || {});
+  if (hint && ids.includes(hint)) return hint;
+  if (ids.includes('main')) return 'main';
+  return ids[0] || 'main';
+}
+
 export function createBridgeServer(options = {}) {
   const host = options.host || '127.0.0.1';
   const port = options.port ?? 8787;
@@ -207,6 +267,13 @@ export function createBridgeServer(options = {}) {
   let lastBubbles = null;
   let lastDemoBubbles = null;
   let lastGiftResetAt = 0;
+  // 系统拾音器：OBS 浏览器源无法申请屏幕/系统音频授权，
+  // 改由普通浏览器页面 /pickup 采集并上报 32 段电平，这里只做中转与缓存
+  let lastPickup = { at: 0, levels: [] };
+  const PICKUP_TTL_MS = 3000;
+  // 最近几条桌宠语音：背景板收到 pet_voice 事件后按 id 来取音频
+  const petVoices = new Map();
+  let petVoiceSequence = 0;
 
   function broadcastEvent(input) {
     sequence += 1;
@@ -228,6 +295,16 @@ export function createBridgeServer(options = {}) {
     }
     // 礼物清空走持久化时间戳：SSE 断线时背景板靠 2 秒兜底轮询也能收到清空动作
     if (payload.kind === 'gift_reset') lastGiftResetAt = payload.at;
+    // 拾音电平每秒十几帧，和气泡名单一样只广播、不进 replay，避免冲掉真实弹幕
+    if (payload.kind === 'pickup') {
+      lastPickup = {
+        at: payload.at,
+        levels: (payload.data && payload.data.levels) || [],
+      };
+      lastEventAt = payload.at;
+      for (const client of eventClients) sendEvent(client, payload);
+      return payload;
+    }
     lastEventAt = payload.at;
     // reload 不进 replay，否则重连时会反复触发整页刷新导致白屏
     if (payload.kind !== 'board_reload') {
@@ -268,15 +345,16 @@ export function createBridgeServer(options = {}) {
       return;
     }
 
-    if (req.method === 'GET' && (pathname === '/board/vertical' || pathname === '/vertical')) {
-      res.writeHead(302, { Location: '/board/board.html?layout=vertical&pet=center', ...CORS });
+    // 系统拾音器：OBS 里点不了「共享音频」，用普通浏览器打开这个页面采集再上报
+    if (req.method === 'GET' && (pathname === '/pickup' || pathname === '/pickup/')) {
+      res.writeHead(302, { Location: '/board/pickup.html', ...CORS });
       res.end();
       return;
     }
 
     if (req.method === 'GET' && pathname.startsWith('/board/')) {
       const name = path.basename(pathname);
-      if (!['board.html', 'board.css', 'board.js', 'bubbleQueue.js', 'giftCombo.js', 'rice.png', 'pet-cd.jpg', 'pet-cd-label.jpg', 'gifts.json'].includes(name)) {
+      if (!['board.html', 'pickup.html', 'board.css', 'board.js', 'bubbleQueue.js', 'giftCombo.js', 'rice.png', 'pet-cd.jpg', 'pet-cd-label.jpg', 'gifts.json'].includes(name)) {
         json(res, 404, { ok: false, error: 'not found' });
         return;
       }
@@ -341,11 +419,130 @@ export function createBridgeServer(options = {}) {
       return;
     }
 
+    // 背景板桌宠：读取 DSH 桌宠当前动画池（待机 / 点击回应 / 小动作）
+    if (req.method === 'GET' && pathname === '/api/dsh-pet/manifest') {
+      try {
+        const found = await discoverDshPetBaseUrl({
+          hint: url.searchParams.get('hint') || '',
+          excludePorts: [port],
+        });
+        if (!found) {
+          json(res, 200, { ok: false, error: 'DSH 桌宠未启动' });
+          return;
+        }
+        const config = await fetchDshPetConfig(found);
+        const petId = pickDshPetId(config, url.searchParams.get('pet') || '');
+        const pools = dshPetAnimPools(config, petId);
+        json(res, 200, {
+          ok: true,
+          petId,
+          name: String((config[petId] && config[petId].name) || petId),
+          idle: pools.idle.length ? pools.idle : ['待机呼吸休闲'],
+          clicks: pools.clicks,
+          actions: pools.actions,
+        });
+      } catch (error) {
+        json(res, 200, { ok: false, error: error.message });
+      }
+      return;
+    }
+
+    // 背景板桌宠素材代理：把 DSH 的透明 webm 原样转给背景板（透传 Range）
+    if (req.method === 'GET' && pathname === '/api/dsh-pet/asset') {
+      const name = String(url.searchParams.get('name') || '').trim();
+      if (!DSH_ANIM_NAME_RE.test(name)) {
+        json(res, 400, { ok: false, error: '动画名不合法' });
+        return;
+      }
+      try {
+        const found = await discoverDshPetBaseUrl({
+          hint: url.searchParams.get('hint') || '',
+          excludePorts: [port],
+        });
+        if (!found) {
+          json(res, 503, { ok: false, error: 'DSH 桌宠未启动' });
+          return;
+        }
+        const config = await fetchDshPetConfig(found);
+        const petId = pickDshPetId(config, url.searchParams.get('pet') || '');
+        const target = `${found}${DSH_PET_THUMB_ROUTE}/${encodeURIComponent(petId)}/${encodeURIComponent(name)}`;
+        const headers = {};
+        if (req.headers.range) headers.range = String(req.headers.range);
+        const response = await fetch(target, { headers, signal: AbortSignal.timeout(15000) });
+        if (!response.ok) {
+          json(res, response.status === 404 ? 404 : 502, {
+            ok: false,
+            error: `DSH 桌宠素材 HTTP ${response.status}`,
+          });
+          return;
+        }
+        const body = Buffer.from(await response.arrayBuffer());
+        const out = {
+          ...CORS,
+          'Content-Type': response.headers.get('content-type') || 'video/webm',
+          'Content-Length': String(body.length),
+          'Cache-Control': 'public, max-age=3600',
+          'Accept-Ranges': response.headers.get('accept-ranges') || 'bytes',
+        };
+        const contentRange = response.headers.get('content-range');
+        if (contentRange) out['Content-Range'] = contentRange;
+        res.writeHead(response.status === 206 ? 206 : 200, out);
+        res.end(body);
+      } catch (error) {
+        json(res, 502, { ok: false, error: error.message });
+      }
+      return;
+    }
+
+    // 背景板桌宠语音：扩展把 MiniMax 合成好的 mp3 原样推进来，背景板按 id 取走播放
+    if (req.method === 'POST' && pathname === '/api/pet-voice') {
+      let body;
+      try {
+        body = await readBinary(req, MAX_VOICE_BYTES);
+      } catch (error) {
+        json(res, 400, { ok: false, error: error.message });
+        return;
+      }
+      const type = String(req.headers['content-type'] || '').split(';')[0].trim();
+      if (!body.length || !/^audio\//i.test(type)) {
+        json(res, 400, { ok: false, error: '需要 audio/* 的音频数据' });
+        return;
+      }
+      petVoiceSequence += 1;
+      const id = `voice-${Date.now()}-${petVoiceSequence}`;
+      petVoices.set(id, { bytes: body, type, at: Date.now() });
+      while (petVoices.size > VOICE_KEEP) petVoices.delete(petVoices.keys().next().value);
+      const text = String(url.searchParams.get('text') || '').slice(0, 1000);
+      const duration = Math.max(0, Math.min(60000, Number(url.searchParams.get('duration')) || 0));
+      // id 同时作为事件 id：背景板按它去 /api/pet-voice/<id> 取音频
+      broadcastEvent({ kind: 'pet_voice', id, text, duration, at: Date.now() });
+      json(res, 200, { ok: true, id, delivered: eventClients.size });
+      return;
+    }
+
+    if (req.method === 'GET' && pathname.startsWith('/api/pet-voice/')) {
+      const id = decodeURIComponent(pathname.slice('/api/pet-voice/'.length));
+      const voice = petVoices.get(id);
+      if (!voice) {
+        json(res, 404, { ok: false, error: 'voice not found' });
+        return;
+      }
+      res.writeHead(200, {
+        ...CORS,
+        'Content-Type': voice.type,
+        'Content-Length': String(voice.bytes.length),
+        'Cache-Control': 'no-store',
+      });
+      res.end(voice.bytes);
+      return;
+    }
+
     if (req.method === 'POST' && pathname === '/api/cache/clear') {
       history.length = 0;
       lastStatus = null;
       lastBalance = null;
       lastEventAt = 0;
+      petVoices.clear();
       song.clearAllCache();
       broadcastEvent({ kind: 'cache_clear', at: Date.now() });
       json(res, 200, { ok: true });
@@ -475,6 +672,40 @@ export function createBridgeServer(options = {}) {
         giftTypes: (source && source.giftTypes) || [],
         gifters: (source && source.gifters) || [],
       });
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/pickup/state') {
+      const fresh = Date.now() - lastPickup.at <= PICKUP_TTL_MS;
+      json(res, 200, {
+        ok: true,
+        active: fresh && lastPickup.levels.length > 0,
+        at: lastPickup.at,
+        levels: fresh ? lastPickup.levels : [],
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/pickup/levels') {
+      let body = null;
+      try {
+        body = await readJson(req);
+      } catch {
+        body = null;
+      }
+      const raw = Array.isArray(body && body.levels) ? body.levels : null;
+      const levels = raw
+        ? raw.slice(0, 64).map((value) => {
+          const n = Number(value);
+          return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+        })
+        : null;
+      if (!levels || !levels.length) {
+        json(res, 400, { ok: false, error: 'levels 需要 0~1 的数字数组' });
+        return;
+      }
+      broadcastEvent({ kind: 'pickup', data: { levels } });
+      json(res, 200, { ok: true });
       return;
     }
 

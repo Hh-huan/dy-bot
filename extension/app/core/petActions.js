@@ -291,7 +291,7 @@ export function resolvePetComboSteps(combo, animations) {
   return [...new Set(steps.map((step) => resolvePetAction(step, animations)).filter(Boolean))];
 }
 
-export const TOKEN_BACK_REPLY = 'token来！token来！';
+export const TOKEN_BACK_REPLY = 'token来，token来';
 
 /** 「token回 / 回token / token还回来」这类关键词统一执行 token来 动作并回固定台词。 */
 export function isTokenBackKeyword(keyword) {

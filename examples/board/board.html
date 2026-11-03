@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>直播背景板</title>
-    <link rel="stylesheet" href="/board/board.css?v=1.16.85" />
+    <link rel="stylesheet" href="/board/board.css?v=1.16.137" />
   </head>
   <body>
     <div class="avatar-bubbles" id="avatarBubbles" aria-hidden="true"></div>
@@ -41,10 +41,69 @@
             <div class="feed" id="feed"></div>
           </section>
 
+          <section class="story-card" id="storyCard" hidden>
+            <div class="story-top">
+              <span class="story-badge">互动剧场</span>
+              <span class="story-scene" id="storyScene"></span>
+              <span class="story-step" id="storyStep"></span>
+            </div>
+            <p class="story-line" id="storyLine"></p>
+            <div class="story-wheel" id="storyWheel" hidden>
+              <div class="story-wheel-dial">
+                <span class="story-wheel-label wheel-a">A</span>
+                <span class="story-wheel-label wheel-b">B</span>
+                <span class="story-wheel-label wheel-c">C</span>
+                <span class="story-wheel-label wheel-d">D</span>
+                <span class="story-wheel-hub"></span>
+                <i class="story-wheel-pointer" id="storyWheelPointer"></i>
+              </div>
+              <p class="story-wheel-tip" id="storyWheelTip">平票！轮盘决定剧情</p>
+            </div>
+            <div class="story-options" id="storyOptions">
+              <div class="story-option" id="storyOptionA">
+                <span class="story-key">A</span>
+                <span class="story-text" id="storyTextA"></span>
+                <span class="story-count" id="storyVotesA">0 票</span>
+                <i class="story-meter"><em id="storyMeterA"></em></i>
+              </div>
+              <div class="story-option" id="storyOptionB">
+                <span class="story-key">B</span>
+                <span class="story-text" id="storyTextB"></span>
+                <span class="story-count" id="storyVotesB">0 票</span>
+                <i class="story-meter"><em id="storyMeterB"></em></i>
+              </div>
+              <div class="story-option" id="storyOptionC">
+                <span class="story-key">C</span>
+                <span class="story-text" id="storyTextC"></span>
+                <span class="story-count" id="storyVotesC">0 票</span>
+                <i class="story-meter"><em id="storyMeterC"></em></i>
+              </div>
+              <div class="story-option" id="storyOptionD">
+                <span class="story-key">D</span>
+                <span class="story-text" id="storyTextD"></span>
+                <span class="story-count" id="storyVotesD">0 票</span>
+                <i class="story-meter"><em id="storyMeterD"></em></i>
+              </div>
+            </div>
+            <div class="story-timer" id="storyTimer"><em id="storyTimerBar"></em></div>
+            <div class="story-foot">
+              <span id="storyHint">发送 A / B / C / D 投票</span>
+              <span class="story-countdown" id="storyCountdown"></span>
+            </div>
+          </section>
+
           <section class="guide-panel">
             <div class="guide-row">
               <span class="guide-key">玩法</span>
               <span class="guide-value">送白饭 · 点歌 · 小心心插队</span>
+            </div>
+            <div class="guide-row">
+              <span class="guide-key">剧场</span>
+              <span class="guide-value">发「剧场XXXXXX」点播，发 A / B / C / D 投票</span>
+            </div>
+            <div class="guide-row">
+              <span class="guide-key">画画</span>
+              <span class="guide-value">发「你画我猜」开局，弹幕猜答案 · 「提示」「下一题」</span>
             </div>
             <div class="guide-row">
               <span class="guide-key">点歌</span>
@@ -83,7 +142,7 @@
           <section class="gift-panel">
             <div class="rice-info">
               <div class="gift-head">
-                <span id="giftHeadLabel">收到礼物</span>
+                <span class="panel-title" id="giftHeadLabel" data-en="TOP GIFTS">收到礼物</span>
                 <b id="giftTotal">0</b>
               </div>
               <div class="gift-list" id="giftList">
@@ -95,9 +154,32 @@
 
           <section class="pet-stage" id="petStage" aria-label="桌宠站位">
             <div class="pet-glow"><i></i><i></i><i></i><i></i><i></i></div>
+            <!-- 养成进度贴着桌宠头顶，养成玩法不再挤在左侧指南里 -->
+            <div class="guide-row growth-row pet-growth">
+              <span class="guide-key">养成</span>
+              <span class="guide-value growth-value">
+                <i class="growth-bar"><em id="growthFill"></em></i>
+                <b id="growthText">小鱼 0/40 碗</b>
+              </span>
+            </div>
             <div class="pet-floor"></div>
+            <!-- 桌宠直接映射进站位：播放 DSH 里那只桌宠的透明动画（素材经桥接代理） -->
+            <video
+              class="pet-video"
+              id="petVideo"
+              autoplay
+              muted
+              loop
+              playsinline
+              aria-hidden="true"
+            ></video>
+            <!-- 桌宠气泡：扩展把投喂给 DSH 的同一句话同步过来，语音念到一半不会先消失 -->
+            <div class="pet-say" id="petSay" hidden>
+              <span class="pet-say-text" id="petSayText"></span>
+            </div>
+            <span class="pet-note" id="petNote" hidden>DSH 桌宠未连接</span>
             <div class="pickup" id="pickup">
-              <button type="button" class="pickup-head" id="pickupToggle" title="点击共享系统音频（音乐播放器）">
+              <button type="button" class="pickup-head" id="pickupToggle" title="点击共享系统音频（音乐播放器）；OBS 里请用浏览器打开 /pickup">
                 <span class="pickup-name">拾音器</span>
                 <em class="pickup-state" id="pickupState">共享系统音频</em>
               </button>
@@ -122,12 +204,49 @@
             </div>
           </section>
 
-          <section class="queue-card">
+          <section class="queue-card" id="queueCard">
             <div class="panel-head">
               <span class="panel-title" data-en="UP NEXT">点歌队列</span>
               <span class="queue-count" id="queueCount">0</span>
             </div>
             <ol class="queue" id="queue"></ol>
+          </section>
+
+          <section class="draw-card" id="drawCard" hidden>
+            <div class="draw-top">
+              <span class="draw-badge">你画我猜</span>
+              <span class="draw-category" id="drawCategory"></span>
+              <span class="draw-round" id="drawRound"></span>
+            </div>
+            <div class="draw-stage">
+              <div class="draw-empty" id="drawEmpty">桌宠正在铺画纸…</div>
+              <svg class="draw-svg" id="drawSvg" viewBox="0 0 1000 620" preserveAspectRatio="xMidYMid meet" hidden></svg>
+              <div class="draw-answer" id="drawAnswer" hidden></div>
+            </div>
+            <div class="draw-word" id="drawWord"></div>
+            <div class="draw-meta">
+              <span id="drawHint"></span>
+              <span id="drawCountdown"></span>
+            </div>
+            <div class="draw-timer" id="drawTimer"><em id="drawTimerBar"></em></div>
+            <ol class="draw-guesses" id="drawGuesses"></ol>
+            <div class="draw-scores" id="drawScores"></div>
+            <div class="draw-foot">
+              <span>发弹幕猜答案 · 首个答对得积分</span>
+              <span>「提示」「下一题」</span>
+            </div>
+          </section>
+
+          <section class="story-canvas-card" id="storyCanvasCard" hidden>
+            <div class="panel-head">
+              <span class="panel-title" data-en="STORY CANVAS">剧场画板</span>
+              <span class="canvas-step" id="canvasStep">0 / 4</span>
+            </div>
+            <div class="story-canvas-stage">
+              <div class="story-canvas-empty" id="storyCanvasEmpty">正在作画…</div>
+              <svg class="story-canvas-svg" id="storyCanvasSvg" viewBox="0 0 1000 620" preserveAspectRatio="xMidYMid meet" hidden></svg>
+            </div>
+            <p class="story-canvas-caption" id="canvasCaption" hidden></p>
           </section>
 
           <section class="stats-card">
@@ -146,6 +265,8 @@
 
       <!-- 本地播放：点歌音频直链由 bridge 下发，OBS 浏览器源音频直接进直播 -->
       <audio id="songAudio" preload="auto" style="display: none"></audio>
+      <!-- 桌宠语音：扩展推给 bridge 的 MiniMax 音频，背景板按 pet_voice 事件取走播放 -->
+      <audio id="petVoiceAudio" preload="auto" style="display: none"></audio>
 
       <footer class="footer">
         <span id="statusText">等待直播数据…</span>
@@ -156,7 +277,16 @@
     <!-- 今日消耗白饭：沿屏幕四周逆时针匀速循环行进（字符由 board.js 按字数生成） -->
     <div class="rice-marquee" id="riceMarquee" aria-hidden="true"></div>
 
-    <script src="/board/giftCombo.js?v=1.16.85"></script>
-    <script src="/board/board.js?v=1.16.85"></script>
+    <!-- 养成满级大招：全场白饭喂到鲸鱼娘形态时触发一次 -->
+    <div class="growth-celebrate" id="growthCelebrate" aria-hidden="true">
+      <div class="growth-celebrate-inner">
+        <span class="growth-celebrate-kicker">投喂达成</span>
+        <b class="growth-celebrate-title">鲸鱼娘觉醒！</b>
+        <span class="growth-celebrate-text">全场累计 <em id="growthCelebrateRice">0</em> 碗白饭</span>
+      </div>
+    </div>
+
+    <script src="/board/giftCombo.js?v=1.16.137"></script>
+    <script src="/board/board.js?v=1.16.137"></script>
   </body>
 </html>

@@ -2,6 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 const feed = $('#feed');
 const queueList = $('#queue');
 const params = new URLSearchParams(location.search);
+// 外部拾音器（/pickup 页面）上报的电平：OBS 浏览器源无法授权共享音频，只能走桥接中转
+const pickupRemote = { at: 0, levels: [] };
 
 const state = {
   online: 0,
@@ -39,12 +41,23 @@ const state = {
   eventSource: null,
   sseOpen: false,
   demo: false,
+  // 白饭养成：本场送礼累计决定大肥鱼的形态，-1 表示还没渲染过
+  growthStage: -1,
+  growthCelebrated: false,
 };
 
 // 统计持久化：插件更新触发 board_reload 整页刷新后，弹幕/回复/礼物等
 // 累计统计从 localStorage 恢复；seenEvents 一并恢复，避免重放事件重复计数
 const STATS_KEY = 'board:stats:v1';
 const GIFT_STATS_VERSION = 4;
+// 房间养成（不分人）：本场累计白饭推着大肥鱼长大，满级触发一次全屏大招
+const GROWTH_STAGES = [
+  { name: '小鱼', min: 0 },
+  { name: '肥鱼', min: 40 },
+  { name: '大肥鱼', min: 150 },
+  { name: '鲸鱼娘', min: 400 },
+];
+const GROWTH_KEY = 'board:growth:v1';
 // 连击去重：同一用户同一礼物只按累计最大值补差额，结束帧漏了也不丢统计
 const giftCombos = GiftCombo.createComboTracker();
 
@@ -182,6 +195,10 @@ function loadStats() {
           // 白饭累计：气泡流准入（累计白饭达到阈值的前 N 位）唯一依据；
           // 旧版本统计只有 count 没有 rice，按 count 回填，避免老观众被挡在气泡流外
           rice: Math.max(0, Number(value.rice) || count),
+          // 亲密度等级由插件随礼物事件下发，存档保留，刷新后榜单标识不丢
+          level: Math.max(0, Number(value.level) || 0),
+          levelTitle: String(value.levelTitle || ''),
+          levelColor: String(value.levelColor || ''),
         });
       }
     }
@@ -244,16 +261,22 @@ function applyGiftReset(at) {
   state.lastGift = '';
   state.gift = 0;
   giftCombos.clear();
+  // 清空本场统计等于重新开一场养成：满级大招下一次还能再触发
+  state.growthStage = 0;
+  state.growthCelebrated = false;
+  if (!state.demo) {
+    try {
+      localStorage.removeItem(GROWTH_KEY);
+    } catch {
+      /* 存储不可用时只影响重播判断 */
+    }
+  }
   // 礼物统计清零后，付费气泡同步清空，免费气泡由定时任务重新补充
   if (bubbleQueue) bubbleQueue.clear('gift-reset').catch(() => {});
   $('#giftTotal').textContent = '0';
   renderGifts();
   updateMetrics();
   saveStats();
-}
-if (params.get('layout') === 'vertical' || params.get('vertical') === '1') {
-  document.body.classList.add('layout-vertical');
-  state.maxFeed = 4;
 }
 if (params.get('demo') === '1') state.demo = true;
 
@@ -263,6 +286,178 @@ const petSlot = ['center', 'left', 'right', 'none'].includes(params.get('pet'))
 document.body.classList.add(`pet-${petSlot}`);
 document.body.dataset.petSlot = petSlot;
 if (params.get('petDebug') === '1') document.body.classList.add('pet-debug');
+
+// 背景板里的桌宠直接播放 DSH 里那只桌宠的透明动画，不再嵌自建宠物页
+const petVideo = document.getElementById('petVideo');
+const petNote = document.getElementById('petNote');
+const petSay = document.getElementById('petSay');
+const petSayText = document.getElementById('petSayText');
+const petVoiceAudio = document.getElementById('petVoiceAudio');
+const petStage = {
+  idle: '',
+  clicks: [],
+  actions: [],
+  idleTimer: 0,
+  reactionAt: 0,
+  sayTimer: 0,
+  talkAt: 0,
+};
+
+function playPetAnimation(name, { loop = false } = {}) {
+  if (!petVideo || !name) return;
+  if (petVideo.dataset.anim === name && petVideo.readyState >= 2) {
+    petVideo.loop = loop;
+    petVideo.currentTime = 0;
+    const replay = petVideo.play();
+    if (replay && replay.catch) replay.catch(() => {});
+    return;
+  }
+  petVideo.loop = loop;
+  petVideo.dataset.anim = name;
+  const fileName = /\.(webm|mov)$/i.test(name) ? name : `${name}.webm`;
+  petVideo.src = `/api/dsh-pet/asset?name=${encodeURIComponent(fileName)}`;
+  const playing = petVideo.play();
+  if (playing && playing.catch) playing.catch(() => {});
+}
+
+function playPetIdle() {
+  clearTimeout(petStage.idleTimer);
+  if (!petStage.idle) return;
+  playPetAnimation(petStage.idle, { loop: true });
+  schedulePetIdleAction();
+}
+
+function schedulePetIdleAction() {
+  clearTimeout(petStage.idleTimer);
+  if (!petStage.actions.length) return;
+  petStage.idleTimer = setTimeout(() => {
+    if (document.hidden) {
+      schedulePetIdleAction();
+      return;
+    }
+    const name = petStage.actions[Math.floor(Math.random() * petStage.actions.length)];
+    playPetAnimation(name);
+  }, 16000 + Math.random() * 14000);
+}
+
+// 礼物 / 关注时插一段互动动作；连击和刷屏用 6 秒节流压住
+function petReact(kind) {
+  if (!petVideo || !petStage.idle) return;
+  const now = Date.now();
+  if (now - petStage.reactionAt < 6000) return;
+  const preferred = kind === 'gift'
+    ? ['吃白饭', '点击回应-开心跃动', '点击回应-元气挥手']
+    : ['点击回应-元气挥手', '点击回应-开心跃动'];
+  const name = preferred.find((item) => petStage.clicks.includes(item) || petStage.actions.includes(item))
+    || petStage.clicks[0]
+    || petStage.actions[0];
+  if (!name) return;
+  petStage.reactionAt = now;
+  playPetAnimation(name);
+}
+
+/* ---------- 桌宠气泡与语音：扩展把投喂给 DSH 的话同步到舞台 ---------- */
+
+/** 气泡停留时间至少覆盖字数（约 200ms/字），最长 30 秒；语音念完前不会先消失。 */
+function showPetSay(text, durationMs = 0) {
+  if (petSlot === 'none') return;
+  const content = String(text || '').trim();
+  if (!petSay || !petSayText || !content) return;
+  petSayText.textContent = content;
+  petSay.hidden = false;
+  clearTimeout(petStage.sayTimer);
+  const ms = Math.min(30000, Math.max(4000, Number(durationMs) || 0, content.length * 200));
+  petStage.sayTimer = setTimeout(() => {
+    petSay.hidden = true;
+  }, ms);
+}
+
+/** 说话时随机播一个小动作；比气泡节流更松，避免一句话内反复打断待机。 */
+function petTalkAction() {
+  if (!petStage.clicks.length || Date.now() - petStage.talkAt < 5000) return;
+  petStage.talkAt = Date.now();
+  const name = petStage.clicks[Math.floor(Math.random() * petStage.clicks.length)];
+  playPetAnimation(name);
+}
+
+/** 播放扩展推过来的 MiniMax 音频；同一句只播一次，新语音直接接管旧语音。 */
+let petVoicePending = null;
+
+// 气泡和说唱动作都等语音到达后再起：pet_say 先缓存，pet_voice 到了才同一帧播气泡+动作。
+// 语音关闭/合成失败时 1 秒后兜底，避免气泡一直不出现。
+let petSayPending = null;
+let petSayFallback = 0;
+
+function queuePetSay(payload) {
+  const text = String(payload.text || '').trim();
+  if (!text) return;
+  petSayPending = { text, duration: Number(payload.duration) || 0, anim: Boolean(payload.anim) };
+  clearTimeout(petSayFallback);
+  petSayFallback = setTimeout(() => {
+    const pending = petSayPending;
+    petSayPending = null;
+    if (!pending) return;
+    showPetSay(pending.text, pending.duration);
+    if (pending.anim) petTalkAction();
+  }, 1000);
+}
+
+function syncPetSayVoice(payload) {
+  clearTimeout(petSayFallback);
+  const pending = petSayPending;
+  petSayPending = null;
+  // 以语音文本为准，保证气泡内容和正在念的内容一致
+  const text = String(payload.text || (pending && pending.text) || '').trim();
+  if (text) showPetSay(text, Number(payload.duration) || (pending && pending.duration) || 0);
+  // 语音真正出声时才切动作，声音和动作不再早半拍
+  if (!pending || pending.anim) petTalkAction();
+}
+
+function playPetVoice(payload) {
+  syncPetSayVoice(payload);
+  // 默认不播：扩展已在本机念一遍，OBS 桌面音频就能收进去；背景板再播一遍会叠成重音。
+  // 只有显式 ?petVoice=1 才让背景板出声（适合 OBS 没采桌面音频的情况）。
+  if (!petVoiceAudio || petSlot === 'none' || params.get('petVoice') !== '1') return;
+  const id = String(payload.id || '');
+  if (!id) return;
+  if (petVoiceAudio.dataset.id === id) return;
+  petVoiceAudio.dataset.id = id;
+  petVoiceAudio.src = `/api/pet-voice/${encodeURIComponent(id)}`;
+  const playing = petVoiceAudio.play();
+  if (playing && playing.catch) {
+    playing.catch((error) => {
+      // 浏览器自动播放策略拦截：记住这句话，等首次点击后再补播
+      if (error && error.name === 'NotAllowedError') petVoicePending = payload;
+    });
+  }
+}
+
+if (petVideo) {
+  petVideo.addEventListener('ended', playPetIdle);
+  petVideo.addEventListener('error', () => {
+    if (petVideo.dataset.anim && petVideo.dataset.anim !== petStage.idle) {
+      setTimeout(playPetIdle, 1200);
+      return;
+    }
+    if (!state.demo) petNote.hidden = false;
+  });
+}
+
+async function initDshPetStage() {
+  if (!petVideo || petSlot === 'none') return;
+  try {
+    const response = await fetch('/api/dsh-pet/manifest', { cache: 'no-store' });
+    const data = await response.json();
+    if (!data || !data.ok || !Array.isArray(data.idle) || !data.idle.length) throw new Error('no dsh pet');
+    petStage.idle = String(data.idle[0]);
+    petStage.clicks = Array.isArray(data.clicks) ? data.clicks.map(String) : [];
+    petStage.actions = Array.isArray(data.actions) ? data.actions.map(String) : [];
+    petNote.hidden = true;
+    playPetIdle();
+  } catch {
+    if (!state.demo) petNote.hidden = false;
+  }
+}
 
 const roomTitle = params.get('title');
 if (roomTitle) $('#roomTitle').textContent = roomTitle;
@@ -393,6 +588,7 @@ function updateMetrics() {
   $('#statFollow').textContent = String(state.followToday);
   $('#statLastGift').textContent = state.lastGift || '—';
   syncRiceMarquee();
+  renderGrowth();
 }
 
 /* ---------- 今日消耗白饭：沿屏幕四周环绕，顶部会被气泡撞落；掉落后按文字朝向换向 ---------- */
@@ -843,7 +1039,106 @@ function giftersEntries() {
       name: item.name,
       avatar: item.avatar,
       count: item.count,
+      level: Math.max(0, Number(item.level) || 0),
+      levelTitle: String(item.levelTitle || ''),
+      levelColor: String(item.levelColor || ''),
     }));
+}
+
+/** 本场累计白饭（碗），与礼物统计同一份差额口径。 */
+function growthRiceTotal() {
+  let total = 0;
+  for (const item of state.giftUsers.values()) {
+    total += Math.max(0, Number(item && item.rice) || 0);
+  }
+  return total;
+}
+
+/** 当前白饭总数对应的养成阶段。 */
+function growthStageFor(rice) {
+  let index = 0;
+  for (let i = 0; i < GROWTH_STAGES.length; i += 1) {
+    if (rice >= GROWTH_STAGES[i].min) index = i;
+  }
+  return { index, name: GROWTH_STAGES[index].name, min: GROWTH_STAGES[index].min };
+}
+
+/**
+ * 养成进度：桌宠头顶常驻显示「小鱼 → 肥鱼 12/40 碗」。
+ * 跨过阶段时弹一条系统消息；到鲸鱼娘形态触发一次全屏大招（本地记过就不再重复）。
+ */
+function renderGrowth() {
+  const rice = growthRiceTotal();
+  const stage = growthStageFor(rice);
+  const next = GROWTH_STAGES[stage.index + 1] || null;
+  const textEl = $('#growthText');
+  const fillEl = $('#growthFill');
+  if (textEl) {
+    const label = next
+      ? `${stage.name} ${Math.round(rice)}/${next.min} 碗`
+      : `${stage.name} 满级 ${Math.round(rice)} 碗`;
+    if (textEl.textContent !== label) textEl.textContent = label;
+    textEl.classList.toggle('full', !next);
+  }
+  if (fillEl) {
+    const span = next ? Math.max(1, next.min - stage.min) : 1;
+    const percent = next ? Math.min(100, Math.max(0, ((rice - stage.min) / span) * 100)) : 100;
+    fillEl.style.width = `${percent.toFixed(1)}%`;
+  }
+
+  if (state.growthStage < 0) {
+    // 首次渲染只记录当前位置，刷新页面不补播历史阶段
+    state.growthStage = stage.index;
+  } else if (stage.index > state.growthStage) {
+    state.growthStage = stage.index;
+    addFeed({
+      type: 'system',
+      name: '养成',
+      badge: '成长',
+      text: `大肥鱼长大啦！现在是「${stage.name}」形态`,
+      ts: Date.now(),
+    });
+  }
+  if (!next) playGrowthCelebrate(rice);
+}
+
+/** 满级大招每场只放一次，用 localStorage 记住，刷新后不会重播。 */
+function playGrowthCelebrate(rice) {
+  if (state.growthCelebrated) return;
+  state.growthCelebrated = true;
+  // 预览页不写真实存档，免得演示数据把真直播的满级大招标记掉
+  if (!state.demo) {
+    try {
+      localStorage.setItem(GROWTH_KEY, '1');
+    } catch {
+      /* 存储不可用时只影响重播判断 */
+    }
+  }
+  const box = $('#growthCelebrate');
+  if (!box) return;
+  const num = $('#growthCelebrateRice');
+  if (num) num.textContent = Math.round(rice).toLocaleString('zh-CN');
+  box.classList.remove('show');
+  void box.offsetWidth; // 强制重排，连续触发时动画能从头上播
+  box.classList.add('show');
+  setTimeout(() => box.classList.remove('show'), 5800);
+}
+
+function loadGrowth() {
+  try {
+    state.growthCelebrated = localStorage.getItem(GROWTH_KEY) === '1';
+  } catch {
+    state.growthCelebrated = false;
+  }
+}
+
+/** 送礼总人数：榜单只展示前 10，标题上的人数要按全部送礼人统计 */
+function giftersTotal() {
+  let total = 0;
+  for (const item of state.giftUsers.values()) {
+    if (item && item.name && (Number(item.count) || 0) > 0) total += 1;
+  }
+  return total;
 }
 
 function createGifter(key) {
@@ -856,9 +1151,12 @@ function createGifter(key) {
   avatar.className = 'gifter-avatar';
   const name = document.createElement('span');
   name.className = 'gifter-name';
+  const level = document.createElement('em');
+  level.className = 'gifter-level';
+  level.hidden = true;
   const count = document.createElement('strong');
   count.className = 'gifter-count';
-  row.append(rank, avatar, name, count);
+  row.append(rank, avatar, name, level, count);
   return row;
 }
 
@@ -888,8 +1186,10 @@ function renderGifters() {
   const list = $('#giftersList');
   if (!list) return;
   const entries = giftersEntries();
+  const total = giftersTotal();
   const countEl = $('#giftersCount');
-  if (countEl) countEl.textContent = `${entries.length} 人`;
+  // 榜单只展示前 10，人数按全部送礼人统计，不能按展示条数
+  if (countEl) countEl.textContent = `${total} 人`;
 
   const existing = new Map();
   for (const node of list.querySelectorAll('.gifter')) existing.set(node.dataset.statKey, node);
@@ -919,6 +1219,18 @@ function renderGifters() {
     paintAvatarIcon(row.querySelector('.gifter-avatar'), item.avatar, item.name);
     const nameEl = row.querySelector('.gifter-name');
     if (nameEl.textContent !== item.name) nameEl.textContent = item.name;
+    // 亲密度 3 级起才显示 Lv 标识，1-2 级人数多，挂上去反而刷屏
+    const levelEl = row.querySelector('.gifter-level');
+    if (levelEl) {
+      const show = item.level >= 3;
+      levelEl.hidden = !show;
+      if (show) {
+        const levelText = `Lv.${item.level}`;
+        if (levelEl.textContent !== levelText) levelEl.textContent = levelText;
+        levelEl.style.color = item.levelColor || '';
+        levelEl.title = item.levelTitle || '';
+      }
+    }
     const num = row.querySelector('.gifter-count');
     const text = item.count.toLocaleString('zh-CN');
     if (num.textContent !== text) num.textContent = text;
@@ -1335,7 +1647,7 @@ async function publishBubbleRoster() {
 
 /* ---------- 气泡队列管理（每 60 秒补充 free 气泡，付费气泡优先替换最早的 free） ---------- */
 const BUBBLE_QUEUE_KEY = 'board:bubble-queue:v1';
-const BUBBLE_QUEUE_VERSION = '1.16.85';
+const BUBBLE_QUEUE_VERSION = '1.16.137';
 const BUBBLE_QUEUE_INTERVAL_MS = 60000;
 const VIEWER_POOL_MAX = 200;
 const VIEWER_POOL_TTL_MS = 5 * 60 * 1000;
@@ -1832,6 +2144,12 @@ function syncAudio(data) {
 document.addEventListener(
   'click',
   () => {
+    if (petVoicePending && petVoiceAudio) {
+      const payload = petVoicePending;
+      petVoicePending = null;
+      delete petVoiceAudio.dataset.id;
+      playPetVoice(payload);
+    }
     if (!audioBlocked) return;
     audioBlocked = false;
     syncAudio(lastSongSnapshot);
@@ -1991,6 +2309,617 @@ function applySong(data) {
   }
 }
 
+/* ---------------- 互动剧场：旁白 + 四条分支 + 实时票数 ---------------- */
+const STORY_CHOICES = ['A', 'B', 'C', 'D'];
+let storyCountdownTimer = 0;
+let storyCountdownEnd = 0;
+let storyCountdownTotal = 0;
+let storyWheelKey = '';
+let storyCurrentStep = 0;
+let storyMaxSteps = 4;
+let storyCanvasStep = 0;
+let storyCanvasEnding = false;
+let storyCanvasAnims = [];
+
+function hideStoryWheel() {
+  const wheel = $('#storyWheel');
+  if (wheel) wheel.hidden = true;
+  storyWheelKey = '';
+}
+
+function applyStoryWheel(data) {
+  const wheel = $('#storyWheel');
+  if (!wheel) return;
+  wheel.hidden = false;
+  const pointer = $('#storyWheelPointer');
+  const tip = $('#storyWheelTip');
+  const pressed = String(data.wheelChoice || '').trim().toUpperCase();
+  const choice = STORY_CHOICES.includes(pressed) ? pressed : 'A';
+  const end = Number(data.wheelEndsAt) || Date.now() + 3400;
+  const key = `${Number(data.step) || 0}:${choice}:${end}`;
+  const leftMs = Math.max(1500, end - Date.now());
+  if (tip) tip.textContent = '平票！轮盘决定剧情…';
+  if (!pointer || key === storyWheelKey) return;
+  storyWheelKey = key;
+  // 四等分轮盘：A/B/C/D 从正上方开始顺时针各占 90°，指针落到对应扇区中心
+  const index = Math.max(0, STORY_CHOICES.indexOf(choice));
+  const target = index * 90 + 45;
+  pointer.style.transition = 'none';
+  pointer.style.transform = 'rotate(0deg)';
+  void pointer.offsetWidth;
+  pointer.style.transition = `transform ${leftMs}ms cubic-bezier(.12,.72,.16,1)`;
+  pointer.style.transform = `rotate(${1080 + target}deg)`;
+  setTimeout(() => {
+    if (!wheel.hidden && tip) tip.textContent = `轮盘停在 ${choice}，剧情继续！`;
+  }, leftMs + 120);
+}
+
+/* ---------------- 剧场画板：演出期间临时替换点歌队列 ---------------- */
+function cancelStoryCanvasAnims() {
+  for (const anim of storyCanvasAnims) {
+    try {
+      anim.cancel();
+    } catch {
+      /* 已经结束的动画取消时报错可忽略 */
+    }
+  }
+  storyCanvasAnims = [];
+}
+
+/** 画板底部的场景/道具说明：留白时整行隐藏，不占画面高度 */
+function setStoryCanvasCaption(text) {
+  const el = $('#canvasCaption');
+  if (!el) return;
+  const value = String(text || '').trim();
+  el.textContent = value;
+  el.hidden = !value;
+}
+
+/** 你画我猜画板单独占用点歌队列的位置；和剧场画板不同屏。 */
+function setDrawBoardMode(active) {
+  const drawCard = $('#drawCard');
+  const canvasCard = $('#storyCanvasCard');
+  const queueCard = $('#queueCard');
+  if (drawCard) drawCard.hidden = !active;
+  if (active && canvasCard) canvasCard.hidden = true;
+  if (queueCard) queueCard.hidden = active || Boolean(canvasCard && !canvasCard.hidden);
+}
+
+function setStoryCanvasMode(active) {
+  const canvasCard = $('#storyCanvasCard');
+  const drawCard = $('#drawCard');
+  const queueCard = $('#queueCard');
+  if (canvasCard) canvasCard.hidden = !active;
+  if (active && drawCard) drawCard.hidden = true;
+  if (queueCard) queueCard.hidden = active || Boolean(drawCard && !drawCard.hidden);
+  if (active) return;
+  cancelStoryCanvasAnims();
+  storyCanvasStep = 0;
+  storyCanvasEnding = false;
+  setStoryCanvasCaption('');
+  const svg = $('#storyCanvasSvg');
+  if (svg) {
+    // SVG 元素没有 HTMLElement 的 hidden 属性，必须走 attribute 才会被 CSS 隐藏
+    svg.setAttribute('hidden', '');
+    svg.innerHTML = '';
+  }
+  const empty = $('#storyCanvasEmpty');
+  if (empty) {
+    empty.hidden = false;
+    empty.textContent = '正在作画…';
+  }
+}
+
+function showStoryCanvasPending(step, maxSteps, label = '', caption = '') {
+  storyCanvasStep = step;
+  cancelStoryCanvasAnims();
+  const svg = $('#storyCanvasSvg');
+  if (svg) {
+    svg.setAttribute('hidden', '');
+    svg.innerHTML = '';
+  }
+  const empty = $('#storyCanvasEmpty');
+  if (empty) {
+    empty.hidden = false;
+    empty.textContent = label ? `正在画${label}…` : '正在作画…';
+  }
+  const badge = $('#canvasStep');
+  if (badge) badge.textContent = label || `${step} / ${maxSteps}`;
+  setStoryCanvasCaption(caption);
+}
+
+function animateStoryCanvas(svgEl) {
+  const shapes = [...svgEl.querySelectorAll('path,line,circle,ellipse,rect,polyline,polygon')];
+  if (!shapes.length) return;
+  // 每笔之间的间隔按元素数量自适应：绘本画面元素更多，整幅画控制在 3.6 秒左右画完
+  const gap = Math.max(38, Math.min(100, Math.floor(3600 / shapes.length)));
+  let delay = 0;
+  for (const shape of shapes) {
+    const stroke = shape.getAttribute('stroke');
+    const fill = shape.getAttribute('fill');
+    const hasStroke = Boolean(stroke && stroke !== 'none' && stroke !== 'transparent');
+    const hasFill = Boolean(fill && fill !== 'none' && fill !== 'transparent');
+    let length = 0;
+    if (hasStroke) {
+      try {
+        length = shape.getTotalLength();
+      } catch {
+        length = 0;
+      }
+    }
+    if (hasStroke && length > 0) {
+      shape.style.strokeDasharray = `${length}`;
+      shape.style.strokeDashoffset = `${length}`;
+      storyCanvasAnims.push(shape.animate(
+        [{ strokeDashoffset: `${length}` }, { strokeDashoffset: '0' }],
+        {
+          duration: Math.max(160, Math.min(460, length * 0.8)),
+          delay,
+          easing: 'ease-in-out',
+          fill: 'forwards',
+        },
+      ));
+    }
+    if (hasFill) {
+      shape.style.opacity = '0';
+      storyCanvasAnims.push(shape.animate(
+        [{ opacity: 0 }, { opacity: 1 }],
+        { duration: 260, delay: delay + 80, easing: 'ease-out', fill: 'forwards' },
+      ));
+    }
+    delay += gap;
+  }
+}
+
+function drawStoryCanvas(svgText, step, caption = '') {
+  const svg = $('#storyCanvasSvg');
+  if (!svg) return;
+  storyCanvasStep = step;
+  cancelStoryCanvasAnims();
+  setStoryCanvasCaption(caption);
+  // 只把 <svg> 内部的图形塞进画板（外层 svg 自带 viewBox），
+  // 嵌套一整个 <svg> 时子 svg 的宽高在 flex 容器里可能算不出来，画面会变成空白
+  const body = /<svg[^>]*>([\s\S]*?)<\/svg>/i.exec(svgText);
+  svg.innerHTML = body ? body[1] : svgText;
+  svg.removeAttribute('hidden');
+  const empty = $('#storyCanvasEmpty');
+  if (empty) empty.hidden = true;
+  // 清掉上一幅画残留的描边动画状态
+  for (const shape of svg.querySelectorAll('path,line,circle,ellipse,rect,polyline,polygon')) {
+    shape.style.strokeDasharray = '';
+    shape.style.strokeDashoffset = '';
+    shape.style.opacity = '';
+  }
+  animateStoryCanvas(svg);
+}
+
+function applyStoryCanvas(data = {}) {
+  if (!data.active) {
+    setStoryCanvasMode(false);
+    return;
+  }
+  const card = $('#storyCanvasCard');
+  if (!card) return;
+  card.hidden = false;
+  const step = Number(data.step) || 0;
+  // 迟到或重放中的旧幕画面不能覆盖当前幕
+  if (step !== storyCurrentStep) return;
+  const ending = Boolean(data.ending);
+  // 大结局要重新作画：即使还是最后一幕的步数，也必须先清空上一幕画面
+  if (data.pending) {
+    if (ending || storyCanvasStep !== step) {
+      storyCanvasEnding = ending;
+      showStoryCanvasPending(step, storyMaxSteps, ending ? '大结局' : '', data.caption || '');
+    } else {
+      // applyStory 已经切到本幕的空白画板，这里只补右上角进度以外的场景说明
+      setStoryCanvasCaption(data.caption || '');
+    }
+    return;
+  }
+  if (!data.svg) return;
+  // 结局画面就位后，旧幕的迟到画面不得覆盖它
+  if (storyCanvasEnding && !ending) return;
+  storyCanvasEnding = ending;
+  drawStoryCanvas(data.svg, step, data.caption || '');
+  if (ending) {
+    const badge = $('#canvasStep');
+    if (badge) badge.textContent = '大结局';
+  }
+}
+
+function startStoryCountdown(endsAt) {
+  const end = Number(endsAt) || 0;
+  if (storyCountdownTimer) {
+    clearInterval(storyCountdownTimer);
+    storyCountdownTimer = 0;
+  }
+  const el = $('#storyCountdown');
+  if (!el) return;
+  if (!end) {
+    el.textContent = '';
+    storyCountdownEnd = 0;
+    storyCountdownTotal = 0;
+    const bar = $('#storyTimerBar');
+    if (bar) bar.style.width = '0%';
+    const timer = $('#storyTimer');
+    if (timer) timer.classList.remove('urgent');
+    return;
+  }
+  // 同一轮投票会反复推送（每张票刷新一次），总时长只在换轮时重置，进度条才不会跳回满格
+  if (end !== storyCountdownEnd) {
+    storyCountdownEnd = end;
+    storyCountdownTotal = Math.max(1000, end - Date.now());
+  }
+  const tick = () => {
+    const leftMs = storyCountdownEnd - Date.now();
+    const left = Math.max(0, Math.round(leftMs / 1000));
+    el.textContent = left > 0 ? `倒计时 ${left}s` : '开奖中…';
+    const bar = $('#storyTimerBar');
+    if (bar) {
+      const ratio = storyCountdownTotal > 0
+        ? Math.min(1, Math.max(0, leftMs / storyCountdownTotal))
+        : 0;
+      bar.style.width = `${(ratio * 100).toFixed(2)}%`;
+    }
+    const timer = $('#storyTimer');
+    if (timer) timer.classList.toggle('urgent', left > 0 && left <= 5);
+    if (left <= 0 && storyCountdownTimer) {
+      clearInterval(storyCountdownTimer);
+      storyCountdownTimer = 0;
+    }
+  };
+  tick();
+  storyCountdownTimer = setInterval(tick, 1000);
+}
+
+function applyStory(data = {}) {
+  const card = $('#storyCard');
+  if (!card) return;
+  const column = card.closest('.left-column');
+  const node = data.node || null;
+  // 剧场期间给 body 挂状态，结束后自动恢复
+  const live = Boolean(data.active && node);
+  document.body.classList.toggle('story-live', live);
+  if (!live) {
+    card.hidden = true;
+    card.classList.remove('story-ending');
+    if (column) column.classList.remove('story-active');
+    storyCurrentStep = 0;
+    setStoryCanvasMode(false);
+    $('#storyOptions').hidden = false;
+    $('#storyTimer').hidden = false;
+    hideStoryWheel();
+    startStoryCountdown(0);
+    return;
+  }
+  card.hidden = false;
+  // 演出期间把点歌队列临时换成剧场画板，点歌数据与逻辑保持原样
+  storyCurrentStep = Number(data.step) || 0;
+  storyMaxSteps = Number(data.maxSteps) || 4;
+  setStoryCanvasMode(true);
+  // 大结局必须重画：即使步数没变，也先清空上一幕，等结局画面推送过来
+  if (storyCanvasStep !== storyCurrentStep) {
+    showStoryCanvasPending(storyCurrentStep, storyMaxSteps);
+  } else if (data.phase === 'ending' && !storyCanvasEnding) {
+    showStoryCanvasPending(storyCurrentStep, storyMaxSteps, '大结局');
+  }
+  // 剧情进行中把左下角整块让给剧场：隐藏玩法指南，剧情卡撑满剩余空间
+  if (column) column.classList.add('story-active');
+  $('#storyScene').textContent = [node.scene || data.topic, node.beat].filter(Boolean).join(' · ');
+  $('#storyStep').textContent = `${Number(data.step) || 0} / ${Number(data.maxSteps) || 4}`;
+  $('#storyLine').textContent = node.narration || '';
+
+  const votes = data.votes || {};
+  const counts = STORY_CHOICES.map((choice) => Number(votes[choice.toLowerCase()]) || 0);
+  const total = Number(votes.total) || counts.reduce((sum, count) => sum + count, 0);
+  // 票数条按四条走向里的最大值归一，零票时都为空
+  const max = Math.max(...counts, 1);
+  const top = Math.max(...counts);
+  STORY_CHOICES.forEach((choice, index) => {
+    const key = choice.toLowerCase();
+    const textEl = $(`#storyText${choice}`);
+    if (textEl) textEl.textContent = node[key] || '';
+    const countEl = $(`#storyVotes${choice}`);
+    if (countEl) countEl.textContent = `${counts[index]} 票`;
+    const meterEl = $(`#storyMeter${choice}`);
+    if (meterEl) meterEl.style.width = `${Math.round((counts[index] / max) * 100)}%`;
+    const optionEl = $(`#storyOption${choice}`);
+    if (optionEl) optionEl.classList.toggle('leading', counts[index] > 0 && counts[index] === top);
+  });
+
+  const wheelPhase = data.phase === 'wheel';
+  const voting = data.phase === 'voting';
+  const endingPhase = data.phase === 'ending';
+  // 大结局台词更长，给剧情卡放宽行数
+  card.classList.toggle('story-ending', endingPhase);
+  $('#storyOptions').hidden = wheelPhase || endingPhase;
+  $('#storyTimer').hidden = wheelPhase || endingPhase;
+  if (wheelPhase) {
+    applyStoryWheel(data);
+  } else {
+    hideStoryWheel();
+  }
+  $('#storyHint').textContent = endingPhase
+    ? '大结局 · 故事完整落幕'
+    : wheelPhase
+      ? '平票！轮盘决定剧情'
+      : voting
+        ? total > 0
+          ? `已收到 ${total} 票，发 A / B / C / D 继续投票 · 发「结束剧场」可收场`
+          : '发送 A / B / C / D 投票 · 发「结束剧场」可收场'
+        : data.title || data.topic
+          ? `正在上演「${data.title || data.topic}」`
+          : '正在上演';
+  startStoryCountdown(voting ? Number(data.voteEndsAt) || 0 : 0);
+  if (wheelPhase) {
+    const countdown = $('#storyCountdown');
+    if (countdown) countdown.textContent = '轮盘转动中…';
+  } else if (endingPhase) {
+    const countdown = $('#storyCountdown');
+    if (countdown) countdown.textContent = '大结局';
+  }
+}
+
+/* ---------------- 你画我猜：逐笔作画 + 弹幕猜词 ---------------- */
+
+const DRAW_SVG_NS = 'http://www.w3.org/2000/svg';
+let drawRoundKey = '';
+let drawStrokeCount = 0;
+let drawCountdownTimer = 0;
+let drawCountdownEndAt = 0;
+let drawCountdownMode = '';
+let drawCountdownTotal = 5000;
+
+function createDrawStroke(stroke = {}) {
+  const kind = stroke.kind || 'path';
+  let node = null;
+  if (kind === 'circle') {
+    node = document.createElementNS(DRAW_SVG_NS, 'circle');
+    node.setAttribute('cx', String(Number(stroke.cx) || 0));
+    node.setAttribute('cy', String(Number(stroke.cy) || 0));
+    node.setAttribute('r', String(Number(stroke.r) || 0));
+  } else if (kind === 'ellipse') {
+    node = document.createElementNS(DRAW_SVG_NS, 'ellipse');
+    node.setAttribute('cx', String(Number(stroke.cx) || 0));
+    node.setAttribute('cy', String(Number(stroke.cy) || 0));
+    node.setAttribute('rx', String(Number(stroke.rx) || 0));
+    node.setAttribute('ry', String(Number(stroke.ry) || 0));
+  } else if (kind === 'line') {
+    node = document.createElementNS(DRAW_SVG_NS, 'line');
+    node.setAttribute('x1', String(Number(stroke.x1) || 0));
+    node.setAttribute('y1', String(Number(stroke.y1) || 0));
+    node.setAttribute('x2', String(Number(stroke.x2) || 0));
+    node.setAttribute('y2', String(Number(stroke.y2) || 0));
+  } else {
+    if (!stroke.d) return null;
+    node = document.createElementNS(DRAW_SVG_NS, 'path');
+    node.setAttribute('d', String(stroke.d));
+  }
+  node.setAttribute('fill', String(stroke.fill || 'none'));
+  node.setAttribute('stroke', stroke.stroke === 'none' ? 'none' : String(stroke.stroke || '#17324f'));
+  node.setAttribute('stroke-width', String(Number(stroke.width) || 6));
+  node.setAttribute('stroke-linecap', 'round');
+  node.setAttribute('stroke-linejoin', 'round');
+  if (stroke.opacity != null) node.setAttribute('opacity', String(Number(stroke.opacity)));
+  if (stroke.transform) node.setAttribute('transform', String(stroke.transform));
+  return node;
+}
+
+/** 新揭晓的一笔：描边从零画出来，填充色随后淡入，形成「笔一笔画」的观感 */
+function animateDrawStroke(shape, stroke = {}) {
+  if (!shape) return;
+  const fill = String(stroke.fill || 'none').toLowerCase();
+  const strokeColor = String(stroke.stroke === undefined ? '#17324f' : stroke.stroke).toLowerCase();
+  const finalOpacity = stroke.opacity != null ? Number(stroke.opacity) : 1;
+  if (fill !== 'none' && fill) {
+    shape.style.opacity = '0';
+    shape.animate(
+      [{ opacity: 0 }, { opacity: finalOpacity }],
+      { duration: 480, easing: 'ease-out', fill: 'forwards' },
+    );
+  } else {
+    shape.style.opacity = String(finalOpacity);
+  }
+  if (strokeColor !== 'none' && typeof shape.getTotalLength === 'function') {
+    try {
+      const length = shape.getTotalLength();
+      if (length > 0 && Number.isFinite(length)) {
+        shape.style.strokeDasharray = `${length}`;
+        shape.style.strokeDashoffset = `${length}`;
+        shape.animate(
+          [{ strokeDashoffset: `${length}` }, { strokeDashoffset: '0' }],
+          { duration: 420, easing: 'ease-out', fill: 'forwards' },
+        );
+        setTimeout(() => {
+          shape.style.strokeDasharray = '';
+          shape.style.strokeDashoffset = '';
+        }, 460);
+      }
+    } catch {
+      /* 某些浏览器对非路径元素取长度会抛错，忽略即可 */
+    }
+  }
+}
+
+function renderDrawGuesses(guesses = []) {
+  const list = $('#drawGuesses');
+  if (!list) return;
+  list.innerHTML = '';
+  for (const guess of guesses.slice(-6)) {
+    const item = document.createElement('li');
+    if (guess.hit) item.className = 'hit';
+    const name = document.createElement('b');
+    name.textContent = String(guess.name || '观众');
+    const text = document.createElement('span');
+    text.textContent = String(guess.text || '');
+    item.append(name, text);
+    list.appendChild(item);
+  }
+}
+
+function renderDrawScores(scores = []) {
+  const box = $('#drawScores');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!scores.length) {
+    const empty = document.createElement('span');
+    empty.textContent = '本场还没有人得分';
+    box.appendChild(empty);
+    return;
+  }
+  for (const item of scores.slice(0, 5)) {
+    const chip = document.createElement('span');
+    const name = document.createElement('em');
+    name.style.fontStyle = 'normal';
+    name.textContent = String(item.name || '观众');
+    const score = document.createElement('b');
+    score.textContent = `${Number(item.score) || 0}分`;
+    chip.append(name, score);
+    box.appendChild(chip);
+  }
+}
+
+function stopDrawCountdown(text = '') {
+  if (drawCountdownTimer) {
+    clearInterval(drawCountdownTimer);
+    drawCountdownTimer = 0;
+  }
+  drawCountdownEndAt = 0;
+  drawCountdownMode = '';
+  const label = $('#drawCountdown');
+  if (label) label.textContent = text;
+  const bar = $('#drawTimerBar');
+  if (bar) bar.style.width = '0%';
+  const timer = $('#drawTimer');
+  if (timer) timer.classList.remove('urgent');
+}
+
+function startDrawCountdown(endsAt, mode, totalMs) {
+  const end = Number(endsAt) || 0;
+  if (!end) {
+    stopDrawCountdown();
+    return;
+  }
+  // 同一轮会因猜词/计分反复推送，结束时间不变时不重置，进度条不会跳回满格
+  if (end === drawCountdownEndAt && mode === drawCountdownMode) return;
+  drawCountdownEndAt = end;
+  drawCountdownMode = mode;
+  drawCountdownTotal = mode === 'guess'
+    ? Math.max(1000, Number(totalMs) || 60000)
+    : Math.max(1000, end - Date.now());
+  if (drawCountdownTimer) clearInterval(drawCountdownTimer);
+  const label = $('#drawCountdown');
+  const bar = $('#drawTimerBar');
+  const timer = $('#drawTimer');
+  const tick = () => {
+    const leftMs = drawCountdownEndAt - Date.now();
+    const left = Math.max(0, Math.ceil(leftMs / 1000));
+    if (label) {
+      label.textContent = mode === 'guess'
+        ? (left > 0 ? `剩余 ${left} 秒` : '开奖中…')
+        : (left > 0 ? `下一题 ${left} 秒` : '准备下一题…');
+    }
+    if (bar) {
+      const ratio = Math.min(1, Math.max(0, leftMs / drawCountdownTotal));
+      bar.style.width = `${(ratio * 100).toFixed(1)}%`;
+    }
+    if (timer) timer.classList.toggle('urgent', mode === 'guess' && leftMs <= 10000);
+  };
+  tick();
+  drawCountdownTimer = setInterval(tick, 1000);
+}
+
+function applyDrawGuess(data = {}) {
+  const card = $('#drawCard');
+  if (!card) return;
+  const live = Boolean(data.active && data.phase !== 'closed');
+  setDrawBoardMode(live);
+  if (!live) {
+    drawRoundKey = '';
+    drawStrokeCount = 0;
+    const svg = $('#drawSvg');
+    if (svg) svg.innerHTML = '';
+    stopDrawCountdown();
+    return;
+  }
+
+  $('#drawCategory').textContent = data.category ? `题材 · ${data.category}` : '简笔画';
+  $('#drawRound').textContent = `第 ${Number(data.round) || 1} / ${Number(data.maxRounds) || 1} 题`;
+
+  const word = $('#drawWord');
+  if (word) {
+    word.textContent = data.answer || data.blank || '';
+    word.classList.toggle('won', Boolean(data.answer));
+  }
+
+  const hint = $('#drawHint');
+  if (hint) {
+    if (data.hint) {
+      hint.textContent = `提示：${data.hint}`;
+      hint.className = 'draw-hint-text';
+    } else if (data.phase === 'drawing') {
+      hint.textContent = '桌宠正在作画，画完才能猜…';
+      hint.className = 'draw-hint-text';
+    } else if (data.phase === 'won') {
+      hint.textContent = data.winner ? `「${data.winner.name}」+${Number(data.winner.score) || 0} 分` : '已猜中';
+      hint.className = 'draw-hint-text';
+    } else if (data.phase === 'revealed') {
+      hint.textContent = '这题先公布答案，下一题马上来';
+      hint.className = 'draw-hint-text';
+    } else {
+      hint.textContent = data.hintAvailable ? '实在猜不到就发「提示」' : '';
+      hint.className = 'draw-hint-text';
+    }
+  }
+
+  const answer = $('#drawAnswer');
+  if (answer) {
+    answer.hidden = !data.answer;
+    if (data.answer) answer.textContent = `答案 · ${data.answer}`;
+  }
+
+  const key = `${data.gameId || ''}:${Number(data.round) || 0}:${data.wordId || ''}`;
+  if (key !== drawRoundKey) {
+    drawRoundKey = key;
+    drawStrokeCount = 0;
+    const svg = $('#drawSvg');
+    if (svg) svg.innerHTML = '';
+  }
+  const svg = $('#drawSvg');
+  const strokes = Array.isArray(data.strokes) ? data.strokes : [];
+  const empty = $('#drawEmpty');
+  if (svg && strokes.length) {
+    svg.removeAttribute('hidden');
+    if (empty) empty.hidden = true;
+    for (let index = drawStrokeCount; index < strokes.length; index += 1) {
+      const shape = createDrawStroke(strokes[index]);
+      if (!shape) continue;
+      svg.appendChild(shape);
+      animateDrawStroke(shape, strokes[index]);
+    }
+    drawStrokeCount = Math.max(drawStrokeCount, strokes.length);
+  } else if (svg) {
+    svg.setAttribute('hidden', '');
+    if (empty) {
+      empty.hidden = false;
+      empty.textContent = data.phase === 'drawing' ? '桌宠正在铺画纸…' : '等桌宠落笔…';
+    }
+  }
+
+  renderDrawGuesses(Array.isArray(data.guesses) ? data.guesses : []);
+  renderDrawScores(Array.isArray(data.scores) ? data.scores : []);
+
+  if (data.phase === 'guessing' && data.guessEndsAt) {
+    startDrawCountdown(data.guessEndsAt, 'guess', (Number(data.roundSec) || 60) * 1000);
+  } else if ((data.phase === 'won' || data.phase === 'revealed') && data.nextAt) {
+    startDrawCountdown(data.nextAt, 'next', 5000);
+  } else if (data.phase === 'drawing') {
+    stopDrawCountdown('作画中…');
+  } else {
+    stopDrawCountdown();
+  }
+}
+
 function handleEvent(payload) {
   if (!payload || !payload.kind) return;
   if (payload.id) {
@@ -2042,6 +2971,7 @@ function handleEvent(payload) {
     $('#statReply').textContent = '0';
     $('#giftTotal').textContent = '0';
     $('#queueCount').textContent = '0';
+    applyDrawGuess({ active: false });
     renderGifts();
     updateMetrics();
     return;
@@ -2054,6 +2984,18 @@ function handleEvent(payload) {
     // 断线重放不再触发旧指令，避免刷新后重演甩飞
     if (payload.replay) return;
     startBubbleThrow(payload.data || {});
+    return;
+  }
+  if (payload.kind === 'story') {
+    applyStory(payload.data || {});
+    return;
+  }
+  if (payload.kind === 'story_canvas') {
+    applyStoryCanvas(payload.data || {});
+    return;
+  }
+  if (payload.kind === 'draw_guess') {
+    applyDrawGuess(payload.data || {});
     return;
   }
   if (payload.kind === 'board_refresh') {
@@ -2069,6 +3011,31 @@ function handleEvent(payload) {
     return;
   }
 
+  if (payload.kind === 'intimacy_up') {
+    // 插件播报观众亲密度升级：弹幕区提示一次，同时把送礼榜里同名用户的等级同步过来
+    const data = payload.data || {};
+    const name = String(data.name || '').trim();
+    const level = Math.max(0, Number(data.level) || 0);
+    if (name && level) {
+      addFeed({
+        type: 'system',
+        name,
+        badge: `Lv.${level}`,
+        text: `亲密度升级 · ${String(data.title || '')}`,
+        ts: Date.now(),
+      });
+      for (const person of state.giftUsers.values()) {
+        if (person && person.name === name) {
+          person.level = level;
+          person.levelTitle = String(data.title || '');
+          person.levelColor = String(data.color || '');
+        }
+      }
+      renderGifters();
+      saveStats();
+    }
+    return;
+  }
   if (payload.kind === 'balance') {
     applyBalance(payload.data);
     return;
@@ -2097,6 +3064,30 @@ function handleEvent(payload) {
   if (payload.kind === 'reply_sent') {
     if (payload.eventId) markReply(payload.eventId, 'replied');
     if (!payload.dryRun) addHost(payload.text, '已发送');
+    return;
+  }
+
+  // 桌宠气泡：插件把投喂给 DSH 的同一句话同步过来；断线重放不重复弹
+  if (payload.kind === 'pet_say') {
+    if (payload.replay) return;
+    queuePetSay(payload);
+    return;
+  }
+
+  // 桌宠语音：音频已由插件推进桥接，这里取对应 id 播放，并对齐气泡与动作
+  if (payload.kind === 'pet_voice') {
+    if (payload.replay) return;
+    playPetVoice(payload);
+    return;
+  }
+
+  // 外部拾音器电平：只更新缓存，拾音器模块自己按新鲜度取用
+  if (payload.kind === 'pickup') {
+    const levels = payload.data && payload.data.levels;
+    if (Array.isArray(levels)) {
+      pickupRemote.levels = levels;
+      pickupRemote.at = Number(payload.at) || Date.now();
+    }
     return;
   }
 
@@ -2148,6 +3139,13 @@ function handleEvent(payload) {
       person.count += delta;
       // 项目里所有礼物都按「白饭」口径统计（与插件 stats.rice 一致），气泡流准入即累计收礼数
       person.rice = (Number(person.rice) || 0) + delta;
+      // 亲密度等级跟礼物一起带过来（插件已脱敏后的展示名），榜单上直接显示
+      const badge = event.intimacy;
+      if (badge && Number(badge.level)) {
+        person.level = Math.max(0, Number(badge.level) || 0);
+        person.levelTitle = String(badge.title || '');
+        person.levelColor = String(badge.color || '');
+      }
       state.giftUsers.set(userKey, person);
       // 付费用户入队：替换最早的 free 气泡；本人原本是 free 则先摘掉 free 标签
       if (bubbleQueue) {
@@ -2161,6 +3159,7 @@ function handleEvent(payload) {
       saveStats();
     }
     if (!completed) return; // 连击中间帧不刷弹幕，等结束帧再上一条
+    petReact('gift');
     addFeed({
       type: 'gift',
       name: user.nickname || '观众',
@@ -2186,6 +3185,7 @@ function handleEvent(payload) {
     const user = event.user || {};
     bumpFollowToday(event.ts || Date.now());
     rememberViewer(user, event.ts || Date.now());
+    petReact('follow');
     addFeed({
       type: 'system',
       name: user.nickname || '关注',
@@ -2198,16 +3198,8 @@ function handleEvent(payload) {
   }
 
   if (event.type === 'member') {
-    const user = event.user || {};
-    rememberViewer(user, event.ts || Date.now());
-    addFeed({
-      type: 'system',
-      name: user.nickname || '进场',
-      avatar: user.avatar || '',
-      badge: '进场',
-      text: '来了',
-      ts: event.ts || Date.now(),
-    });
+    // 进场人数多时会把弹幕聊天刷屏：只记录观众，不往聊天面板写进场条目
+    rememberViewer(event.user, event.ts || Date.now());
     return;
   }
 
@@ -2245,9 +3237,10 @@ function seedDemo() {
     ['白饭', 3],
     ['小心心', 6],
   ]);
+  // 演示数据带上亲密度等级，预览页能直接看到送礼榜的 Lv 标识
   state.giftUsers = new Map([
-    ['demo-u1', { name: '小鹿', avatar: '', count: 3, rice: 3 }],
-    ['demo-u2', { name: '糖糖', avatar: '', count: 6, rice: 6 }],
+    ['demo-u1', { name: '小鹿', avatar: '', count: 3, rice: 3, level: 5, levelTitle: '老饭友', levelColor: '#52a4f7' }],
+    ['demo-u2', { name: '糖糖', avatar: '', count: 6, rice: 6, level: 7, levelTitle: '专属饲养员', levelColor: '#ffc531' }],
   ]);
   // 演示用在线用户池：让免费气泡补充逻辑在预览页也能跑通
   for (const [id, nickname] of [
@@ -2382,8 +3375,11 @@ tickClock();
 setInterval(tickClock, 1000);
 // 气泡队列定时任务：页面启动即注册，模块加载失败会自动重试
 initBubbleQueue();
+// 背景板桌宠：连上 DSH 后播放它那只桌宠的待机动画
+initDshPetStage();
 refreshSong();
 refreshBalance();
+loadGrowth();
 updateMetrics();
 syncRiceMarquee();
 window.addEventListener('resize', syncRiceMarquee);
@@ -2467,6 +3463,8 @@ if (params.get('demo') === '1') {
   let dpr = 1;
   let raf = 0;
   let ctx2d = null;
+  // 外部拾音器（普通浏览器里的 /pickup 页面）是否正在推电平；OBS 里只能靠这个
+  let remoteLabelOn = false;
   // 渐变按柱高量化缓存，避免每帧为 32 根柱各建一个 CanvasGradient
   const gradientCache = new Map();
   const barHeights = new Array(BAR_COUNT).fill(0);
@@ -2536,10 +3534,17 @@ if (params.get('demo') === '1') {
     if (analyser) {
       analyser.getByteFrequencyData(freqData);
     }
+    // 本页采集优先；没有授权时改用外部拾音器推来的电平（1.5 秒没更新即视为断开）
+    const remoteLive = pickupRemote.levels.length > 0 && Date.now() - pickupRemote.at < 1500;
+    if (!stream && remoteLive !== remoteLabelOn) {
+      remoteLabelOn = remoteLive;
+      if (remoteLive) setState('系统音频 LIVE（外部拾音）', 'on');
+      else setState('共享系统音频');
+    }
     const gap = Math.max(2 * dpr, width * 0.004);
     const barWidth = Math.max(1, (width - gap * (BAR_COUNT - 1)) / BAR_COUNT);
     const baseline = height - 1;
-    const live = Boolean(analyser);
+    const live = Boolean(analyser) || remoteLive;
 
     for (let i = 0; i < BAR_COUNT; i += 1) {
       let level = 0;
@@ -2553,6 +3558,8 @@ if (params.get('demo') === '1') {
         for (let bin = start; bin < end; bin += 1) sum += freqData[bin] || 0;
         level = Math.pow(sum / (end - start) / 255, 0.86);
         level = Math.min(1, level * 1.7);
+      } else if (remoteLive) {
+        level = Math.min(1, Math.max(0, Number(pickupRemote.levels[i]) || 0));
       } else {
         level = 0.035 + Math.sin(i * 0.7 + Date.now() / 1600) * 0.008;
       }
@@ -2579,7 +3586,7 @@ if (params.get('demo') === '1') {
       return;
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      setState('浏览器不支持系统音频', 'error');
+      setState('OBS 无法授权 · 浏览器打开 /pickup 拾音', 'error');
       return;
     }
     setState('请选择屏幕并勾选分享音频…');
@@ -2631,7 +3638,9 @@ if (params.get('demo') === '1') {
       }
       analyser = null;
       setState(
-        error && error.name === 'NotAllowedError' ? '已取消共享 · 点击重试' : '系统音频失败 · 点击重试',
+        error && error.name === 'NotAllowedError'
+          ? '已取消共享 · 点击重试'
+          : '拾音失败 · 浏览器打开 /pickup',
         'error',
       );
     }
@@ -2645,6 +3654,22 @@ if (params.get('demo') === '1') {
     freqData = null;
     setState('共享系统音频');
   }
+
+  // 向桥接要一次外部拾音电平，之后靠 SSE 实时推送；轮询只作断线兜底
+  async function refreshRemote() {
+    try {
+      const response = await fetch('/api/pickup/state', { cache: 'no-store' });
+      const data = await response.json();
+      if (data && data.ok && Array.isArray(data.levels) && data.levels.length) {
+        pickupRemote.levels = data.levels;
+        pickupRemote.at = Number(data.at) || 0;
+      }
+    } catch {
+      /* 桥接没启动时保持本地拾音 */
+    }
+  }
+  refreshRemote();
+  setInterval(refreshRemote, 3000);
 
   toggle.addEventListener('click', start);
   canvas.addEventListener('click', start);

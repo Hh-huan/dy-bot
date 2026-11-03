@@ -11,17 +11,44 @@ import {
   pruneState,
   reserveSend,
 } from './core/rules.js';
-import { classifySongIntent, classifySongSafety, generateAiReply, generateWarmupReply, isSensitiveCredentialQuery, judgeSongViolation, shouldRiffNickname, suggestPositiveSongs, summarizeLiveSession, summarizeViewerMemory } from './core/ai.js';
+import { classifySongIntent, classifySongSafety, generateAiReply, generateStoryDrawing, generateStoryEnding, generateStoryNode, generateWarmupReply, isSensitiveCredentialQuery, judgeSongViolation, shouldRiffNickname, suggestPositiveSongs, summarizeLiveSession, summarizeViewerMemory } from './core/ai.js';
 import { AUTO_SONG_INTERVAL_MS, AUTO_SONG_LIBRARY_KEY, AUTO_SONG_LIBRARY_MAX, AUTO_SONG_VOICE_TEXT, autoSongTrigger, buildAutoSongSender, buildPetSongReply, mergeAutoSongLibrary, pickAutoSongFromLibrary } from './core/autoSong.js';
 import { DshPetClient, discoverDshPetBaseUrl } from './core/dshPet.js';
-import { speakMiniMax, stopMiniMaxTts, unlockTtsAudio } from './core/minimaxTts.js';
+import { speakTts, stopTts, unlockTtsAudio } from './core/minimaxTts.js';
 import { PetBridge } from './core/petBridge.js';
 import { addTokenRecord, normalizeTokenRecord, tokenDateKey } from './core/tokenUsage.js';
 import { isTokenBackKeyword, matchPetCombo, parsePetActionCommand, petActionPool, petActionSpeech, petComboSpeech, petIdleSpeech, resolvePetAction, resolvePetComboSteps, TOKEN_BACK_REPLY } from './core/petActions.js';
 import { AUDIENCE_FRESH_MS, isFollowAsk, isTokenWarmup, isViewerPresent, pickWarmupLine, pickWarmupPresetInfo, stripFollowAsk, warmupTrigger } from './core/warmup.js';
+import { STORY_VOTE_SEC, STORY_WHEEL_SEC, beginStory, closeStory, createStoryState, isStoryStopCommand, openVoting, parseStoryCommand, parseVoteChoice, pushHistory, recordVote, resolveStoryTopic, resolveWinner, storyDigest, storyOptionText, tallyVotes } from './core/storyTheater.js';
+import { findUnsafeStoryWord, unsafeStoryNode } from './core/storySafety.js';
+import { fallbackStoryDrawing } from './core/storyCanvas.js';
+import {
+  DRAW_ROUND_SEC,
+  DRAW_STROKE_MS,
+  beginDrawGame,
+  createDrawState,
+  drawGuessSnapshot,
+  drawScoreboard,
+  expireDrawRound,
+  finishDrawGame,
+  hydrateDrawScores,
+  isDrawGuessCandidate,
+  isDrawHintCommand,
+  isDrawSkipCommand,
+  isDrawStartCommand,
+  isDrawStopCommand,
+  pickDrawDeck,
+  recordDrawGuess,
+  revealDrawHint,
+  revealDrawStroke,
+  shouldRevealDrawHint,
+  skipDrawRound,
+  startDrawRound,
+} from './core/drawGuess.js';
 import { isCutSongQuestion, isPetSongHelp, isQueueJumpQuestion, parseSongQuery, parseCutSongIntent, parseVolumeIntent } from './core/songIntent.js';
 import { SENSITIVE_SONG_MESSAGE, findSensitiveSongWord } from './core/sensitiveSong.js';
 import { isGiftNoticeText } from './core/giftNotice.js';
+import { applyIntimacyAward, intimacyAwardForEvent, intimacyAwardForSong, intimacyBadge, intimacyGiftTail, intimacyWelcomeTail, levelUpLine, normalizeIntimacy } from './core/intimacy.js';
 import { isUnsafeNickname, safeNickname, sanitizeEventNickname } from './core/nicknameSafety.js';
 import { formatNowText, isTimeQuestion } from './core/timeIntent.js';
 import { formatBalanceReply, isBalanceQuestion } from './core/balanceIntent.js';
@@ -35,7 +62,7 @@ import {
   normalizeSpeechPriority,
   shouldInterrupt,
 } from './core/speechPriority.js';
-import { buildCrossViewerDigest, buildViewerDigest, buildViewerHistoryEntry, fallbackCrossReply, fallbackMemoryReply, fitMemoryReply, hasViewerMemory, isMemoryQuestion, recordViewerEvent, recordViewerSong, userFollowedAnchor } from './core/viewerMemory.js';
+import { buildCrossViewerDigest, buildReunionLine, buildViewerDigest, buildViewerHistoryEntry, fallbackCrossReply, fallbackMemoryReply, fitMemoryReply, hasViewerMemory, isMemoryQuestion, recordViewerEvent, recordViewerSong, userFollowedAnchor } from './core/viewerMemory.js';
 import { filterVisitLedger, formatApologyReply, formatChainBrokenReply, formatEvidenceReply, formatEvidenceTimeline, formatPendingReply, formatUnavailableReply, isVisitDispute, ledgerActionFromEvent } from './core/evidence.js';
 import {
   loadRules,
@@ -191,6 +218,21 @@ const ctx = {
   warmupNow,
   testBoard,
   clearGiftStats,
+  startStory: () => storyCommandOnLeader('start'),
+  stopStory: () => storyCommandOnLeader('stop'),
+  getStoryState: () => ({ ...storyState }),
+  getStoryAutoStatus: storyAutoStatus,
+  startDrawGuess: () => drawCommandOnLeader('start'),
+  stopDrawGuess: () => drawCommandOnLeader('stop'),
+  getDrawGuessState: () => ({
+    active: drawState.active,
+    phase: drawState.phase,
+    round: drawState.round,
+    maxRounds: drawState.maxRounds,
+    word: drawState.phase === 'won' || drawState.phase === 'revealed' ? (drawState.word && drawState.word.word) || '' : '',
+    winner: drawState.winner ? { ...drawState.winner } : null,
+    scores: drawScoreboard(drawState, 5),
+  }),
   testSong,
   getSongState,
 };
@@ -258,6 +300,7 @@ async function applySettings(patch) {
 }
 
 function clearRuntimeCache() {
+  stopDrawGame('', { announce: false });
   state.ruleState = createState();
   state.feedEvents = [];
   state.logs = [];
@@ -271,10 +314,8 @@ function clearRuntimeCache() {
   state.lastWarmupCheck = 0;
   state.viewers.clear();
   state.memoryPending.clear();
-  speechQueue.length = 0;
-  speechGeneration += 1;
-  speechBusy = false;
-  speechProtected = false;
+  clearSpeechQueue('cleared');
+  interruptSpeech('cleared');
   state.priorityPasses.clear();
   state.priorityGiftAt.clear();
   state.replyMarks.clear();
@@ -377,7 +418,7 @@ async function setServiceEnabled(enabled) {
     warmup: { ...settings.warmup, enabled: false },
     petBridge: { ...settings.petBridge, enabled: false },
   });
-  stopMiniMaxTts();
+  stopTts();
   const stopped = await stopBridgeService();
   toast(
     stopped.ok
@@ -424,7 +465,7 @@ function syncSettingsUI() {
   }
   updateHostSetup();
   updateHint();
-  if (!state.settings.dshPet.tts) stopMiniMaxTts();
+  if (!state.settings.dshPet.tts) stopTts();
   schedulePetStatus();
   scheduleDshMenu();
 }
@@ -509,6 +550,23 @@ async function postBoard(payload) {
     });
   } catch {
     /* 背景板/桥接未启动时忽略 */
+  }
+}
+
+/** 把 MiniMax 已合成好的语音原样交给桥接，背景板收到 pet_voice 后取走播放。 */
+async function postBoardVoice(text, audio, mime) {
+  if (!state.settings.board.enabled) return;
+  if (!audio || !audio.length) return;
+  try {
+    const query = new URLSearchParams({ text: String(text || '').slice(0, 600), duration: '0' });
+    await fetch(`${boardUrl()}/api/pet-voice?${query}`, {
+      method: 'POST',
+      headers: { 'Content-Type': mime || 'audio/mpeg' },
+      body: audio,
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    /* 背景板没开 / 桥接没启动时忽略，本机语音照常播放 */
   }
 }
 
@@ -848,7 +906,12 @@ async function handleBalanceQuestion(event) {
 
 // 背景板 / 桌宠弹幕区展示的昵称也脱敏，避免不良昵称出现在直播画面上
 function postPetEvent(event) {
-  postPet({ kind: 'event', room: roomInfo(), event: sanitizeEventNickname(event) });
+  const safe = sanitizeEventNickname(event);
+  // 顺手把观众亲密度带给背景板：送礼榜上要显示等级标识
+  const key = String((safe.user && (safe.user.id || safe.user.nickname)) || '');
+  const badge = key ? intimacyBadge(state.viewers.get(key)) : null;
+  if (badge) safe.intimacy = badge;
+  postPet({ kind: 'event', room: roomInfo(), event: safe });
 }
 
 function ensureTokenDay() {
@@ -1164,10 +1227,32 @@ async function resetAll() {
 
 /* ---------------- 页面连接 ---------------- */
 
-function onRuntimeMessage(message, sender) {
+function onRuntimeMessage(message, sender, sendResponse) {
   if (!message || typeof message.type !== 'string') return;
   if (message.type === 'dy-frame') onFrame(message, sender);
   else if (message.type === 'dy-page') onPageInfo(message, sender);
+  else if (message.type === 'dy-leader-story') {
+    // 手动开演/结束交给主面板执行：副面板只转发，避免两边同时演一场
+    if (!isLeader) return undefined;
+    const run = message.command === 'stop'
+      ? Promise.resolve(stopStory('主播手动结束') || { ok: true })
+      : startStoryRound({ manual: true });
+    Promise.resolve(run)
+      .then((result) => sendResponse(result || { ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  else if (message.type === 'dy-leader-draw') {
+    // 你画我猜同理：只让主面板推进画板，副面板不参与计时和播报
+    if (!isLeader) return undefined;
+    const run = message.command === 'stop'
+      ? Promise.resolve({ ok: stopDrawGame('主播手动结束') })
+      : startDrawGame({ manual: true });
+    Promise.resolve(run)
+      .then((result) => sendResponse(result || { ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
 }
 
 function onFrame(message, sender) {
@@ -1405,6 +1490,8 @@ function handleEvent(event) {
     if (status === 3) {
       failQueuedReplyMarks();
       state.replyQueue.length = 0;
+      stopStory('直播已结束');
+      stopDrawGame('直播已结束', { announce: false });
       log('warn', '检测到直播结束，已清空待发送队列');
       saveLiveMemory({ final: true });
       if (state.settings.replyEnabled) {
@@ -1431,10 +1518,12 @@ function handleEvent(event) {
   // 不是观众发言：不计入聊天、不点歌、不回帖，礼物本身由 gift 事件处理
   if (event.type === 'chat' && isGiftNoticeText(event.content)) return;
   if (event.type === 'chat' && event.content) state.lastChatAt = now;
-  rememberViewer(event);
+  // 礼物差额先算出来：白饭统计和亲密度积分共用同一份差额，重复的结束帧不会重复加分
+  const giftRice = event.type === 'gift' ? giftComboDelta(event, now) : 0;
+  rememberViewer(event, { giftRice });
   recordVisitLedger(event);
   if (event.type === 'gift') {
-    state.stats.rice += giftComboDelta(event, now);
+    state.stats.rice += giftRice;
   }
 
   if (event.type === 'like') {
@@ -1471,6 +1560,15 @@ function handleEvent(event) {
   handleDshEvent(event);
   forwardEvent(event);
   if (event.type === 'gift') handleSongGift(event).catch(() => {});
+  // 互动剧场投票最先吃掉 A / B / 1 / 2 这类短口令，避免被动作或点歌逻辑误判
+  if (event.type === 'chat' && handleStoryVote(event)) return;
+  // 观众收场口令「结束剧场」：正在演就直接收场，没在演也静默吞掉，不当作闲聊
+  if (event.type === 'chat' && handleStoryStopCommand(event)) return;
+  // 弹幕点播「剧场xxxx」：开演后由桌宠接管，口令本身不产生任何直播间回复
+  if (event.type === 'chat' && handleStoryCommand(event)) return;
+  // 你画我猜：开场/结束/提示/下一题口令先处理，猜词弹幕再进入计分，二者都静默吞掉
+  if (event.type === 'chat' && handleDrawCommand(event)) return;
+  if (event.type === 'chat' && handleDrawGuess(event)) return;
   if (event.type === 'chat' && isCutSongQuestion(event.content)) {
     if (handleCutSongQuestion(event)) return;
   }
@@ -2553,7 +2651,10 @@ async function handleSongCommand(event, presetQuery) {
     const result = await response.json();
     if (result.ok) {
       const record = state.viewers.get(userKey);
-      if (record) recordViewerSong(record, result.song);
+      if (record) {
+        recordViewerSong(record, result.song);
+        awardViewerSongIntimacy(record);
+      }
       // 点歌成功也写入留证台账：否认点过歌时可核对
       recordLedgerAudit(
         event.user,
@@ -2917,7 +3018,10 @@ async function handlePetSongHelp(event) {
     }
     const song = (outcome.result && outcome.result.song) || picked;
     const record = state.viewers.get(userKey);
-    if (record) recordViewerSong(record, song);
+    if (record) {
+      recordViewerSong(record, song);
+      awardViewerSongIntimacy(record);
+    }
     replySong(buildPetSongReply(nickname, song.title));
     speakDsh(AUTO_SONG_VOICE_TEXT, { priority: SPEECH_PRIORITY.song });
     log('info', `桌宠帮点歌：@${nickname} → 《${song.title}》${song.artist || ''}`);
@@ -2973,7 +3077,10 @@ async function maybeAutoSong() {
 
     const result = outcome.result;
     const record = [...state.viewers.values()].find((viewer) => viewer && viewer.name === receiver);
-    if (record) recordViewerSong(record, result.song);
+    if (record) {
+      recordViewerSong(record, result.song);
+      awardViewerSongIntimacy(record);
+    }
     // 公屏发送格式固定为「大肥鱼点给@xxx」，语音单独通知接收用户
     replySong(sender);
     speakDsh(AUTO_SONG_VOICE_TEXT, { priority: SPEECH_PRIORITY.song });
@@ -3344,7 +3451,7 @@ function setupDshPet() {
   };
 
   if (!cfg.enabled) {
-    stopMiniMaxTts();
+    stopTts();
     refreshDshUI();
     return;
   }
@@ -3470,11 +3577,25 @@ async function handleDshMenu(label, petId) {
 }
 
 async function dshBroadcast(text, options = {}) {
-  if (!isLeader || !dshPet || !state.settings.dshPet.enabled) return;
+  // 互动剧场进行中桌宠画面只留给剧情；弹幕回复仍在直播间发文字
+  if (storyState.active && !options.storyLine) return;
+  if (!isLeader) return;
   const content = String(text || '').trim();
   if (!content) return;
   if (!options.force && Date.now() - lastDshBubbleAt < 900) return;
   lastDshBubbleAt = Date.now();
+  // 背景板上的桌宠同步显示气泡（动画由背景板自己随机配，不跟 DSH 抢动作）
+  if (state.settings.board.enabled) {
+    postBoard({
+      kind: 'pet_say',
+      text: content,
+      duration: Math.max(1000, Math.min(60000, Number(options.duration) || 8000)),
+      anim: Boolean(options.anim) && !dshActionPlaying(),
+      storyLine: Boolean(options.storyLine),
+    });
+  }
+  // 背景板与 DSH 桌宠是两条独立链路：没开 DSH 桌宠时，背景板气泡照样要出
+  if (!dshPet || !state.settings.dshPet.enabled) return;
   try {
     await dshPet.broadcast(content, {
       petId: options.petId,
@@ -3545,6 +3666,7 @@ function idleAnimationPool() {
 function canIdleAnim() {
   const cfg = state.settings.dshPet || {};
   if (!isLeader || !dshPet || !cfg.enabled || !cfg.idleAnimEnabled) return false;
+  if (storyState.active) return false; // 互动剧场进行中，空闲动画让路
   if (state.aiBusy || state.sending || state.warmupBusy || state.replyQueue.length) return false;
   if (dshChatTimer) return false;
   const now = Date.now();
@@ -3576,6 +3698,1175 @@ function scheduleIdleAnim() {
   }, delay);
 }
 
+/* ---------------- 你画我猜：桌宠作画 + 弹幕猜词 ---------------- */
+
+const drawState = createDrawState();
+let drawTimer = 0;
+let drawLastRevealAt = 0;
+let drawRoundStartedAt = 0;
+let drawStarting = false;
+let drawLastStartAt = 0;
+let drawRecentWords = [];
+let drawScoresDay = '';
+const DRAW_SCORES_KEY = 'dy.drawGuessScores.v1';
+const DRAW_RECENT_KEY = 'dy.drawGuessRecent.v1';
+/** 观众两次开局之间的冷却，避免同一波人连续刷开局 */
+const DRAW_REQUEST_COOLDOWN_MS = 2 * 60 * 1000;
+/** 开画后至少 5 秒才允许「下一题」，防止刚出题就被跳过 */
+const DRAW_SKIP_MIN_MS = 5000;
+
+function drawDayKey(now = Date.now()) {
+  const date = new Date(now);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function loadDrawStorage() {
+  drawScoresDay = drawDayKey();
+  try {
+    const raw = JSON.parse(localStorage.getItem(DRAW_SCORES_KEY) || 'null');
+    if (raw && raw.day === drawScoresDay && Array.isArray(raw.users)) {
+      hydrateDrawScores(
+        drawState,
+        raw.users.map((item) => ({
+          ...item,
+          name: safeNickname((item && item.name) || '观众'),
+        })),
+      );
+    }
+  } catch {
+    /* 坏存档直接忽略 */
+  }
+  try {
+    const raw = JSON.parse(localStorage.getItem(DRAW_RECENT_KEY) || 'null');
+    if (raw && raw.day === drawScoresDay && Array.isArray(raw.ids)) {
+      drawRecentWords = raw.ids.map((id) => String(id || '')).filter(Boolean).slice(-12);
+    }
+  } catch {
+    /* 坏存档直接忽略 */
+  }
+}
+
+/** 跨天时清掉昨天的积分与出题记录，积分榜按自然日统计 */
+function ensureDrawDay() {
+  const day = drawDayKey();
+  if (day === drawScoresDay) return;
+  drawScoresDay = day;
+  drawState.scores = new Map();
+  drawRecentWords = [];
+}
+
+function saveDrawStorage() {
+  try {
+    localStorage.setItem(
+      DRAW_SCORES_KEY,
+      JSON.stringify({ day: drawScoresDay, users: drawScoreboard(drawState, 50) }),
+    );
+    localStorage.setItem(
+      DRAW_RECENT_KEY,
+      JSON.stringify({ day: drawScoresDay, ids: drawRecentWords.slice(-12) }),
+    );
+  } catch {
+    /* 存储满 / 隐私模式时忽略，不影响本场玩法 */
+  }
+}
+
+loadDrawStorage();
+
+function drawConfig() {
+  return state.settings.drawGuess || {};
+}
+
+function drawRoundSecConfig() {
+  return Math.max(30, Math.min(120, Number(drawConfig().roundSec) || DRAW_ROUND_SEC));
+}
+
+function drawRoundsConfig() {
+  return Math.max(3, Math.min(10, Number(drawConfig().maxRounds) || 5));
+}
+
+/** 你画我猜的展示只走背景板，事件流复用 /event 的 kind */
+function pushDrawBoard() {
+  if (!state.settings.board.enabled) return;
+  postBoard({ kind: 'draw_guess', at: Date.now(), data: drawGuessSnapshot(drawState) });
+}
+
+/** 桌宠气泡 + 语音的统一出口；语音失败不影响本轮玩法 */
+function drawSay(text, options = {}) {
+  const content = String(text || '').trim();
+  if (!content) return;
+  dshBroadcast(content, {
+    force: true,
+    anim: options.anim !== false,
+    duration: Math.min(30000, Math.max(6000, Number(options.duration) || 9000)),
+  });
+  if (options.speak !== false) speakDsh(content, { priority: SPEECH_PRIORITY.chat });
+}
+
+function drawCelebrateAnim() {
+  if (!dshPet) return '';
+  for (const name of ['开心跃动', '比心', '转圈', '笑一个']) {
+    const resolved = resolvePetAction(name, dshPet.animations);
+    if (resolved) return resolved;
+  }
+  return '';
+}
+
+function drawStopTimer() {
+  if (!drawTimer) return;
+  clearInterval(drawTimer);
+  drawTimer = 0;
+}
+
+/** 主循环：逐笔揭晓、自动提示、猜词超时、下一题排期都由它驱动 */
+function drawTick() {
+  if (!drawState.active) {
+    drawStopTimer();
+    return;
+  }
+  const now = Date.now();
+  if (drawState.phase === 'drawing') {
+    if (now - drawLastRevealAt >= DRAW_STROKE_MS) {
+      drawLastRevealAt = now;
+      const phase = revealDrawStroke(drawState, now);
+      pushDrawBoard();
+      if (phase === 'guessing') {
+        const word = drawState.word;
+        drawSay(
+          `画完啦！这题是「${word.category}」，${[...word.word].length}个字，发弹幕猜答案，第一个猜中加积分～`,
+          { duration: 11000 },
+        );
+      }
+    }
+    return;
+  }
+  if (drawState.phase === 'guessing') {
+    let changed = false;
+    if (shouldRevealDrawHint(drawState, now)) {
+      revealDrawHint(drawState);
+      changed = true;
+      drawSay(`提示来啦：${drawState.word.hint}`, { speak: false, duration: 10000 });
+    }
+    if (now >= drawState.guessEndsAt) {
+      const word = expireDrawRound(drawState, now);
+      if (word) {
+        changed = true;
+        saveDrawStorage();
+        drawSay(`时间到！这题的答案是「${word}」，下一题马上来～`, { duration: 10000 });
+      }
+    }
+    if (changed) pushDrawBoard();
+    return;
+  }
+  if (drawState.nextAt && now >= drawState.nextAt) {
+    drawState.nextAt = 0;
+    if (drawState.round >= drawState.maxRounds) {
+      endDrawGame();
+      return;
+    }
+    const word = startDrawRound(drawState, now);
+    if (!word) {
+      endDrawGame();
+      return;
+    }
+    drawLastRevealAt = now;
+    drawRoundStartedAt = now;
+    pushDrawBoard();
+    drawSay(`第${drawState.round}题来啦，桌宠继续画，大家准备好猜～`, { speak: false, duration: 7000 });
+  }
+}
+
+function startDrawTimer() {
+  drawStopTimer();
+  drawTimer = setInterval(drawTick, 500);
+}
+
+function announceDrawWin(name, word, score) {
+  const text = `答对啦！「${name}」猜中了「${word}」，本题加 ${score} 积分！`;
+  drawSay(text, { duration: 13000 });
+  const anim = drawCelebrateAnim();
+  // 观众正在播放动作玩法时不抢动画，只保留气泡和语音
+  if (anim && !dshActionPlaying()) {
+    dshActionBusyUntil = Date.now() + 4500;
+    dshAnim(anim, null, { force: true });
+  }
+}
+
+async function startDrawGame(options = {}) {
+  const now = Date.now();
+  if (drawStarting || drawState.active) return { ok: false, error: '上一局还在画，等它收场再开' };
+  const cfg = drawConfig();
+  if (!options.manual && cfg.enabled === false) return { ok: false, error: '未开启你画我猜' };
+  if (state.settings.serviceEnabled === false) return { ok: false, error: '服务已停用' };
+  if (!isLeader) return { ok: false, error: '请等主面板接管后再试' };
+  // 互动剧场和画画都用背景板主舞台，不能让两套玩法同时开口
+  if (storyStarting || storyState.active) {
+    return { ok: false, error: '互动剧场正在演出，等它收场再画' };
+  }
+  if (!state.settings.board.enabled) {
+    return { ok: false, error: '你画我猜需要先打开背景板，画板就在背景板左侧' };
+  }
+  if (!options.manual && (!state.lastFrameAt || Date.now() - state.lastFrameAt > 10 * 60 * 1000)) {
+    return { ok: false, error: '还没收到直播间数据，可能没在直播' };
+  }
+
+  drawStarting = true;
+  try {
+    ensureDrawDay();
+    const rounds = drawRoundsConfig();
+    const deck = pickDrawDeck({ count: rounds, exclude: drawRecentWords });
+    beginDrawGame(drawState, {
+      deck,
+      now,
+      roundSec: drawRoundSecConfig(),
+      maxRounds: deck.length,
+    });
+    const first = startDrawRound(drawState, now);
+    if (!first) {
+      finishDrawGame(drawState);
+      return { ok: false, error: '题库暂时没有可用的题' };
+    }
+    drawRecentWords = [...drawRecentWords, ...deck.map((word) => word.id)].slice(-12);
+    drawLastStartAt = now;
+    drawLastRevealAt = now;
+    drawRoundStartedAt = now;
+    saveDrawStorage();
+    startDrawTimer();
+    pushDrawBoard();
+    const by = String(options.by || '').trim();
+    log('info', `你画我猜开局：${drawState.maxRounds} 题，${drawState.roundSec} 秒猜词${by ? `（${by} 发起）` : ''}`);
+    drawSay(
+      `你画我猜开画啦！这场一共${drawState.maxRounds}题，桌宠画完大家就发弹幕猜答案，第一个猜中的加积分～`,
+      { duration: 13000 },
+    );
+    return { ok: true, rounds: drawState.maxRounds };
+  } finally {
+    drawStarting = false;
+  }
+}
+
+function endDrawGame() {
+  drawStopTimer();
+  const scores = drawScoreboard(drawState, 3);
+  finishDrawGame(drawState);
+  pushDrawBoard();
+  const top = scores.map((item, index) => `${index + 1}. ${item.name} ${item.score}分`).join('，');
+  const text = top
+    ? `你画我猜收场啦！本场积分榜：${top}。还想玩就发「你画我猜」～`
+    : '你画我猜收场啦，下次发「你画我猜」还能接着玩～';
+  drawSay(text, { duration: 15000 });
+  saveDrawStorage();
+  log('info', `你画我猜结束：${top || '本场无人得分'}`);
+}
+
+function stopDrawGame(reason = '', options = {}) {
+  if (!drawState.active) {
+    drawStopTimer();
+    return false;
+  }
+  drawStopTimer();
+  finishDrawGame(drawState);
+  pushDrawBoard();
+  saveDrawStorage();
+  if (options.announce !== false) {
+    drawSay(
+      reason ? `画画先收工啦（${reason}），想继续玩就发「你画我猜」～` : '画画先收工啦，想继续玩就发「你画我猜」～',
+      { duration: 10000 },
+    );
+  }
+  if (reason) log('info', `你画我猜结束：${reason}`);
+  return true;
+}
+
+/**
+ * 观众指令：开画 / 结束 / 提示 / 下一题。
+ * 口令本身一律吞掉，避免被 AI、点歌或动作逻辑重复处理。
+ */
+function handleDrawCommand(event) {
+  if (!event || event.type !== 'chat' || isOwnEvent(event)) return false;
+  const text = event.content || '';
+  const name = safeNickname((event.user && event.user.nickname) || '观众');
+
+  if (isDrawStopCommand(text)) {
+    if (isLeader && drawState.active) stopDrawGame(`${name} 发「结束画画」`);
+    return true;
+  }
+
+  if (isDrawStartCommand(text)) {
+    if (!isLeader || drawState.active || drawStarting) return true;
+    if (Date.now() - drawLastStartAt < DRAW_REQUEST_COOLDOWN_MS) return true;
+    startDrawGame({ by: name }).catch(() => {});
+    return true;
+  }
+
+  if (!drawState.active) return false;
+
+  if (isDrawHintCommand(text)) {
+    if (isLeader && !drawState.hintShown && drawState.phase === 'guessing' && revealDrawHint(drawState)) {
+      pushDrawBoard();
+      drawSay(`提示来啦：${drawState.word.hint}`, { speak: false, duration: 10000 });
+    }
+    return true;
+  }
+
+  if (isDrawSkipCommand(text)) {
+    const elapsed = Date.now() - drawRoundStartedAt;
+    if (isLeader && elapsed >= DRAW_SKIP_MIN_MS && (drawState.phase === 'drawing' || drawState.phase === 'guessing')) {
+      const word = skipDrawRound(drawState, Date.now());
+      if (word) {
+        pushDrawBoard();
+        saveDrawStorage();
+        drawSay(`这题跳过啦，答案是「${word}」，下一题马上来～`, { duration: 9000 });
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+/** 猜词弹幕：只在猜词窗口计分，第一个答对的人拿走本题积分 */
+function handleDrawGuess(event) {
+  if (!drawState.active || !event || event.type !== 'chat' || isOwnEvent(event)) return false;
+  if (!isDrawGuessCandidate(event.content)) return false;
+  const user = event.user || {};
+  const key = String(user.id || user.nickname || '').trim();
+  if (!key) return false;
+  if (drawState.phase !== 'guessing') return true;
+  const name = safeNickname(user.nickname || '观众');
+  const now = Date.now();
+  const result = recordDrawGuess(drawState, { key, name, content: event.content, now });
+  if (result.status === 'hit') {
+    pushDrawBoard();
+    saveDrawStorage();
+    announceDrawWin(name, result.word, result.score);
+  } else if (result.status === 'miss') {
+    pushDrawBoard();
+  }
+  return true;
+}
+
+/**
+ * 设置页的开画 / 结束按钮：副面板只转发给主面板，
+ * 否则两个面板各自维护一套状态，背景板会收到互相互斥的推送。
+ */
+function drawCommandOnLeader(command) {
+  if (isLeader) {
+    return command === 'stop'
+      ? Promise.resolve(stopDrawGame('主播手动结束') || { ok: true })
+      : startDrawGame({ manual: true });
+  }
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'dy-leader-draw', command }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          resolve({ ok: false, error: '主面板没有响应，请关掉多余的扩展面板后重试' });
+          return;
+        }
+        resolve(response);
+      });
+    } catch {
+      resolve({ ok: false, error: '主面板没有响应，请关掉多余的扩展面板后重试' });
+    }
+  });
+}
+
+/* ---------------- 互动剧场：弹幕投票驱动的 AI 剧情 ---------------- */
+
+const storyState = createStoryState();
+let storyRunId = 0;
+let storyVoteTimer = 0;
+let storyStarting = false;
+/** 自动开演计时持久化：侧边栏/扩展重载不再把间隔计时清零 */
+const STORY_SCHEDULE_KEY = 'dy.storySchedule.v1';
+/** 超过 12 小时的旧计时直接作废，隔天重开直播从当前时间重新计时 */
+const STORY_SCHEDULE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+/** 观众名单的有效时间：在线人数缺报时用它判断直播间是否有人 */
+const STORY_AUDIENCE_FRESH_MS = 2 * 60 * 1000;
+/** 首次安装/计时失效后的首场：最多等 20 分钟就检查一次，不用干等满一整轮 */
+const STORY_FIRST_RUN_MS = 20 * 60 * 1000;
+
+const storyBootAt = Date.now();
+/** 有没有可用的历史计时：没有时首场按 STORY_FIRST_RUN_MS 算 */
+let storyScheduleFresh = false;
+
+function loadStoryScheduleAt() {
+  storyScheduleFresh = true;
+  try {
+    const raw = localStorage.getItem(STORY_SCHEDULE_KEY);
+    if (!raw) return Date.now();
+    const at = Number(JSON.parse(raw).at);
+    if (!Number.isFinite(at) || at <= 0) return Date.now();
+    if (at > Date.now() + 60_000 || Date.now() - at > STORY_SCHEDULE_MAX_AGE_MS) return Date.now();
+    storyScheduleFresh = false;
+    return at;
+  } catch {
+    return Date.now();
+  }
+}
+
+function rememberStorySchedule(at = Date.now()) {
+  lastStoryAt = at;
+  storyScheduleFresh = false;
+  try {
+    localStorage.setItem(STORY_SCHEDULE_KEY, JSON.stringify({ at }));
+  } catch {
+    /* localStorage 不可用时只保留内存计时 */
+  }
+}
+
+let lastStoryAt = loadStoryScheduleAt();
+let lastStoryRequestAt = 0;
+let storyAutoNote = '';
+let storyAutoNoteAt = 0;
+/** 弹幕点播的最短间隔：一场演完就 3 分钟内不能再点，避免被刷着连开 */
+const STORY_REQUEST_COOLDOWN_MS = 3 * 60 * 1000;
+/** 单段剧情语音的基础等待上限；真正上限会按台词长度放宽，只作为接口卡死时的安全阀 */
+const STORY_SPEECH_MAX_WAIT_MS = 60000;
+/** 语音结束后的收尾缓冲：让最后一个字真正落地，再推进下一步 */
+const STORY_SPEECH_TAIL_MS = 600;
+/** 公布结果后给观众留一点反应时间，再进下一幕 */
+const STORY_TRANSITION_MS = 600;
+
+// 情绪 → 桌宠动画候选：按顺序尝试，用第一个能匹配到的动画名
+const STORY_EMOTION_ACTIONS = {
+  happy: ['开心跃动', '比心', '笑一个', '转圈'],
+  sad: ['难过', '委屈', '哭'],
+  excited: ['跳舞', '放烟花', '转圈'],
+  surprised: ['吓一跳', '惊讶'],
+  shy: ['害羞', '卖萌', '比心'],
+  angry: ['生气', '跺脚'],
+  neutral: [],
+};
+
+// AI 连续失败时用的兜底剧本：中间幕循环取用，最后一幕换成收尾节点，
+// 保证 4～6 幕的任意长度都能演完，不会因为接口抖动直接卡死
+const STORY_FALLBACK_NODES = [
+  { scene: '意外的宝箱', beat: '起', prop: '会发光的旧宝箱', narration: '故事里的主人公在路边捡到一个会发光的宝箱，箱子上写着「只给今天最勇敢的人」。', a: '打开宝箱', b: '先喊朋友来', c: '绕开走人', d: '搬回家研究', emotion: 'surprised' },
+  { scene: '宝箱开启', beat: '承', prop: '写着字的纸条', narration: '宝箱里没有金币，只有一张纸条：今天的好运会随机送给直播间里的一个人。', a: '自己先许愿', b: '让观众许愿', c: '把纸条收好', d: '再读一遍背面', emotion: 'excited' },
+  { scene: '好运降临', beat: '转', prop: '装满话语的泡泡', narration: '话音刚落，直播间飘起一串泡泡，每个泡泡里都装着一句观众说过的话。', a: '戳破最大的泡泡', b: '把泡泡收进口袋', c: '追着泡泡跑', d: '喊大家一起吹', emotion: 'happy' },
+  { scene: '夜里的灯塔', beat: '转', prop: '忽明忽暗的灯塔', narration: '天慢慢黑下来，远处的灯塔忽明忽暗，好像在给主人公打一个只有他们才懂的手势。', a: '朝灯塔走过去', b: '在原地等天亮', c: '喊朋友一起看', d: '记下灯塔的节奏', emotion: 'surprised' },
+  { scene: '意外的同伴', beat: '承', prop: '会说话的旧地图', narration: '旧地图突然开口，说自己记得一条没人走过的小路，但要求主人公先答应它一个条件。', a: '先听条件', b: '直接上路', c: '把地图还回去', d: '让观众帮它取名字', emotion: 'happy' },
+];
+
+const STORY_FALLBACK_FINALE = {
+  scene: '故事落幕',
+  beat: '合',
+  prop: '被抱在怀里的空宝箱',
+  narration: '主人公把所有好运都分了出去，抱着空宝箱打了个小小的哈欠，说明天还要继续冒险。',
+  a: '明天继续冒险',
+  b: '现在就睡一觉',
+  c: '把宝箱送给观众',
+  d: '约大家明晚见',
+  emotion: 'shy',
+};
+
+function storyEmotionAnim(emotion) {
+  const candidates = STORY_EMOTION_ACTIONS[emotion] || [];
+  if (!dshPet) return '';
+  for (const name of candidates) {
+    const resolved = resolvePetAction(name, dshPet.animations);
+    if (resolved) return resolved;
+  }
+  return '';
+}
+
+/** 把当前剧情状态推给背景板：旁白、两个选项和实时票数都由这里下发 */
+function pushStoryBoard() {
+  if (!state.settings.board.enabled) return;
+  const votes = tallyVotes(storyState);
+  postBoard({
+    kind: 'story',
+    at: Date.now(),
+    data: {
+      active: storyState.active,
+      topic: storyState.topic,
+      title: (storyState.bible && storyState.bible.title) || '',
+      step: storyState.step,
+      maxSteps: storyState.maxSteps,
+      phase: storyState.phase,
+      node: storyState.node,
+      votes,
+      voteEndsAt: storyState.voteEndsAt,
+      wheelChoice: storyState.wheelChoice,
+      wheelEndsAt: storyState.wheelEndsAt,
+      seconds:
+        storyState.phase === 'voting'
+          ? Math.max(0, Math.round((storyState.voteEndsAt - Date.now()) / 1000))
+          : 0,
+    },
+  });
+}
+
+/** 旁白播报：桌宠气泡 + 语音 + 对应情绪动作，返回「语音真正播完」的 Promise */
+function tellStory(node, step, maxSteps) {
+  const head = `【互动剧场·第${step}/${maxSteps}幕】${node.scene ? `${node.scene}　` : ''}`;
+  // 气泡停留时间跟着旁白字数走，语音念完之前不会先消失
+  const bubbleMs = Math.min(30000, Math.max(10000, String(node.narration || '').length * 220));
+  dshBroadcast(`${head}${node.narration}`, { force: true, anim: false, duration: bubbleMs, storyLine: true });
+  const anim = storyEmotionAnim(node.emotion);
+  if (anim) {
+    dshAnim(anim, null, { force: true });
+    dshActionBusyUntil = Date.now() + 6000;
+  }
+  return waitForStorySpeech(node.narration);
+}
+
+/** 剧情流程用的定时等待：可被 runId 守卫打断，不会阻塞收场 */
+function storySleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+/**
+ * 语音同步等待：以音频真正 ended 为准，严格避免「还没念完就跳下一步」。
+ * 没开 TTS / 没连桌宠时没有语音可等，直接放行；接口异常会在队列里立即结算，
+ * 另有安全上限兜底，保证任何情况下都不会永久挂住演出。
+ */
+async function waitForStorySpeech(text) {
+  const content = String(text || '').trim();
+  if (!content) return 'empty';
+  if (!isLeader || !state.settings.dshPet.enabled || !state.settings.dshPet.tts) return 'skipped';
+  // 长台词（结局）本身就可能念很久，上限按时长放宽，避免把正常的长语音误判成卡死
+  const capMs = Math.min(120000, Math.max(STORY_SPEECH_MAX_WAIT_MS, content.length * 450));
+  let timer = 0;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), capMs);
+  });
+  try {
+    return await Promise.race([
+      speakDsh(content, { priority: SPEECH_PRIORITY.chat, storyLine: true }),
+      timeout,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    // 播放结束的那一刻最后一个字可能还没完全落地，留一点尾巴再推进剧情
+    await storySleep(STORY_SPEECH_TAIL_MS);
+  }
+}
+
+/** 把当前幕的画板状态推给背景板（不影响点歌队列的数据与逻辑） */
+function pushStoryCanvas(data) {
+  if (!state.settings.board.enabled) return;
+  postBoard({ kind: 'story_canvas', at: Date.now(), data });
+}
+
+let storyDrawingToken = 0;
+
+/**
+ * 当前幕画板：AI 生成手绘 SVG，失败时用本地兜底画面，绝不空白。
+ * ending=true 时画的是全剧大结局，会强制清空上一幕并重新绘制。
+ * 返回 Promise 在画面推送到背景板后 resolve，供结局流程等画面就绪再开口。
+ */
+async function requestStoryDrawing(step, node, runId, options = {}) {
+  if (!state.settings.board.enabled) return;
+  const ending = Boolean(options.ending);
+  const token = ++storyDrawingToken;
+  // 画板底部场景说明：结局用剧名收尾，普通幕显示场景与关键道具
+  const caption = ending
+    ? ['大结局', storyState.bible && storyState.bible.title ? `《${storyState.bible.title}》` : '']
+      .filter(Boolean)
+      .join(' · ')
+    : [node.scene || '', node.prop ? `关键道具：${node.prop}` : ''].filter(Boolean).join(' · ');
+  pushStoryCanvas({ active: true, step, topic: storyState.topic, pending: true, ending, caption });
+  let svg = '';
+  try {
+    const result = await generateStoryDrawing({
+      ai: state.settings.ai,
+      topic: storyState.topic,
+      step,
+      maxSteps: storyState.maxSteps,
+      node,
+      ending,
+      bible: storyState.bible,
+      history: storyState.history,
+      timeoutMs: options.timeoutMs || 30000,
+    });
+    addTokenUsage(result.tokens || 0);
+    svg = result.svg;
+  } catch (error) {
+    log('warn', `互动剧场画板生成失败：${error.message}`);
+  }
+  if (token !== storyDrawingToken || runId !== storyRunId || !storyState.active) return;
+  pushStoryCanvas({
+    active: true,
+    step,
+    topic: storyState.topic,
+    svg: svg || fallbackStoryDrawing(node),
+    ending,
+    caption,
+  });
+}
+
+/** 主播附加要求若含违规词就整体忽略，避免把风险写进指令 */
+function safeStoryPrompt() {
+  const prompt = String((state.settings.storyTheater || {}).prompt || '').trim();
+  if (!prompt) return '';
+  const hit = findUnsafeStoryWord(prompt);
+  if (hit) {
+    log('warn', `互动剧场附加要求含敏感内容（${hit}），已忽略`);
+    return '';
+  }
+  return prompt;
+}
+
+async function fetchStoryNode(step) {
+  try {
+    const result = await generateStoryNode({
+      ai: state.settings.ai,
+      topic: storyState.topic,
+      step,
+      maxSteps: storyState.maxSteps,
+      history: storyState.history,
+      lastChoice: storyState.lastChoice,
+      votes: tallyVotes(storyState),
+      prompt: safeStoryPrompt(),
+      bible: storyState.bible,
+      maxChars: 640,
+      timeoutMs: 20000,
+    });
+    addTokenUsage(result.tokens || 0);
+    const unsafe = unsafeStoryNode(result.node);
+    if (unsafe) throw new Error(`剧情含敏感内容（${unsafe}）`);
+    return result.node;
+  } catch (error) {
+    log('warn', `互动剧场生成失败（第${step}幕）：${error.message}`);
+    return null;
+  }
+}
+
+/** 兜底：最后一幕用收尾节点，中间幕按幕数循环取用，4～6 幕都能演完 */
+function fallbackStoryNode(step) {
+  if (step >= storyState.maxSteps) return STORY_FALLBACK_FINALE;
+  return STORY_FALLBACK_NODES[(Math.max(1, step) - 1) % STORY_FALLBACK_NODES.length];
+}
+
+async function fetchStoryNodeWithRetry(step) {
+  let node = await fetchStoryNode(step);
+  if (!node) node = await fetchStoryNode(step);
+  if (!node) {
+    node = fallbackStoryNode(step);
+    log('warn', `互动剧场第${step}幕改用兜底剧本`);
+  }
+  return node;
+}
+
+async function runStoryNode(step, runId) {
+  if (runId !== storyRunId || !storyState.active) return;
+  storyState.phase = 'narrating';
+  // 新一幕开始就清空上一幕票数：旁白朗读期间不该继续显示旧票，否则会被当成 A 默认多一票
+  storyState.votes = new Map();
+  storyState.voteEndsAt = 0;
+  pushStoryBoard();
+  const node = await fetchStoryNodeWithRetry(step);
+  if (runId !== storyRunId || !storyState.active) return;
+  storyState.step = step;
+  storyState.node = node;
+  // 第一幕顺手立住全剧设定：剧名、主角、世界、目标，后续每一幕和结局都沿用
+  if (step <= 1 && (node.title || node.protagonist || node.setting)) {
+    storyState.bible = {
+      title: node.title || '',
+      protagonist: node.protagonist || '',
+      setting: node.setting || '',
+      goal: node.goal || '',
+    };
+  }
+  pushStoryBoard();
+  log('info', `互动剧场第${step}幕：${node.scene || ''}｜A ${node.a} / B ${node.b} / C ${node.c} / D ${node.d}`);
+
+  // 画板与本幕旁白同时开始：作画在后台进行，不占用语音时间
+  requestStoryDrawing(step, node, runId).catch(() => {});
+  // 旁白必须真正念完才开投票，不再用字数估算提前跳转
+  await tellStory(node, step, storyState.maxSteps);
+  if (runId !== storyRunId || !storyState.active || storyState.phase !== 'narrating') return;
+
+  openVoting(storyState, node, { now: Date.now(), seconds: STORY_VOTE_SEC });
+  pushStoryBoard();
+  dshBroadcast(`投票开始！A：${node.a}　／　B：${node.b}　／　C：${node.c}　／　D：${node.d}　（发 A / B / C / D）`, {
+    force: true,
+    anim: false,
+    duration: 8000,
+    storyLine: true,
+  });
+  speakDsh(`投票开始！A：${node.a}，B：${node.b}，C：${node.c}，D：${node.d}。发 A、B、C 或 D，${STORY_VOTE_SEC} 秒后揭晓。`, {
+    priority: SPEECH_PRIORITY.chat,
+    storyLine: true,
+  });
+  storyVoteTimer = setTimeout(() => settleStoryVote(runId).catch(() => {}), STORY_VOTE_SEC * 1000);
+}
+
+async function settleStoryVote(runId) {
+  storyVoteTimer = 0;
+  if (runId !== storyRunId || !storyState.active || storyState.phase !== 'voting') return;
+  const votes = tallyVotes(storyState);
+  const winner = resolveWinner(storyState);
+  // 平票不直接公布；一边票都没收到（0:0）同样算平票，也必须转轮盘判定
+  if (winner.tied || votes.total === 0) {
+    storyState.phase = 'wheel';
+    storyState.voteEndsAt = 0;
+    storyState.wheelChoice = winner.choice;
+    storyState.wheelEndsAt = Date.now() + STORY_WHEEL_SEC * 1000;
+    pushStoryBoard();
+    const text = votes.total
+      ? `第${storyState.step}幕 A ${votes.a} 票、B ${votes.b} 票、C ${votes.c} 票、D ${votes.d} 票，平票！轮盘转起来，看它停在谁那边～`
+      : `这一轮四个走向都没收到票，轮盘转起来，让它来拍板～`;
+    dshBroadcast(text, { force: true, anim: true, duration: 8000, storyLine: true });
+    const anim = storyEmotionAnim('excited');
+    if (anim) dshAnim(anim, null, { force: true });
+    log('info', `互动剧场平票，转轮盘：${text}`);
+    // 轮盘动画跟口播都要结束才公布结果，语音没念完绝不提前跳转
+    await Promise.all([
+      storySleep(STORY_WHEEL_SEC * 1000 + 1200),
+      waitForStorySpeech(text),
+    ]);
+    if (runId !== storyRunId || !storyState.active || storyState.phase !== 'wheel') return;
+    await finishStoryVote(runId, winner);
+    return;
+  }
+  await finishStoryVote(runId, winner);
+}
+
+/** 投票落定：写入历史、公布选择，语音播完后再进入下一幕或结局 */
+async function finishStoryVote(runId, winner) {
+  if (runId !== storyRunId || !storyState.active) return;
+  const votes = tallyVotes(storyState);
+  const node = storyState.node || {};
+  const picked = storyOptionText(node, winner.choice);
+  const fromWheel = Boolean(storyState.wheelChoice);
+  storyState.wheelChoice = '';
+  storyState.wheelEndsAt = 0;
+  pushHistory(storyState, node, winner.choice);
+  storyState.lastChoice = winner.choice;
+  storyState.phase = 'narrating';
+  storyState.voteEndsAt = 0;
+  pushStoryBoard();
+
+  // 没票的情况一律先走轮盘，因此非轮盘结算时必然是有票的正常结果
+  const text = fromWheel
+    ? `轮盘停下，指向 ${winner.choice}：「${picked}」！剧情继续～`
+    : `第${storyState.step}幕投票：A ${votes.a} 票、B ${votes.b} 票、C ${votes.c} 票、D ${votes.d} 票，观众选择了「${picked}」！`;
+  dshBroadcast(text, { force: true, anim: true, duration: 8000, storyLine: true });
+  log('info', `互动剧场结算：${text}`);
+
+  // 公布结果的口播完整播完，才开始下一幕/结局
+  await waitForStorySpeech(text);
+  if (runId !== storyRunId || !storyState.active) return;
+  await storySleep(STORY_TRANSITION_MS);
+  if (runId !== storyRunId || !storyState.active) return;
+
+  if (storyState.step >= storyState.maxSteps) {
+    runStoryEnding(runId).catch(() => {});
+    return;
+  }
+  runStoryNode(storyState.step + 1, runId).catch(() => {});
+}
+
+/** 结局兜底：AI 失败时也要给出完整收束，不能戛然而止 */
+function fallbackStoryEnding() {
+  const node = storyState.node || {};
+  const bible = storyState.bible || {};
+  const picked = storyOptionText(node, storyState.lastChoice);
+  const topic = bible.title || storyState.topic || '这场小剧场';
+  const hero = bible.protagonist || '主人公';
+  const prop = node.prop ? `那件一路陪着${hero}的「${node.prop}」` : '一路收集的故事';
+  const recap = (storyState.history || [])
+    .map((item) => item.scene)
+    .filter(Boolean)
+    .slice(-3)
+    .join('、');
+  return `「${topic}」终于走到了最后。${picked ? `大家替${hero}选了「${picked}」，` : ''}${recap ? `从${recap}一路走来，` : ''}${prop}终于有了归宿。${hero}站在最后的光里，回头看了看陪自己走到这里的每一个人，把这段冒险认真地收进了心里。这场故事到这里就完完整整地结束啦。`;
+}
+
+async function fetchStoryEnding() {
+  const ai = state.settings.ai || {};
+  const node = storyState.node || {};
+  const result = await generateStoryEnding({
+    ai,
+    topic: storyState.topic,
+    history: storyState.history,
+    lastChoice: storyState.lastChoice,
+    lastOption: storyOptionText(node, storyState.lastChoice),
+    prompt: safeStoryPrompt(),
+    bible: storyState.bible,
+    maxChars: 420,
+    timeoutMs: 20000,
+  });
+  const text = String(result.text || '').trim();
+  const unsafe = findUnsafeStoryWord(text);
+  if (unsafe) throw new Error(`结局含敏感内容（${unsafe}）`);
+  return text;
+}
+
+/** 最后一幕投票后的真·结局：AI 收束全文，结局画面在后台作画，语音念完再收场 */
+async function runStoryEnding(runId) {
+  if (runId !== storyRunId || !storyState.active) return;
+  storyState.phase = 'ending';
+  storyState.voteEndsAt = 0;
+  storyState.wheelChoice = '';
+  storyState.wheelEndsAt = 0;
+  let text = '';
+  try {
+    text = await fetchStoryEnding();
+  } catch {
+    text = '';
+  }
+  if (runId !== storyRunId || !storyState.active || storyState.phase !== 'ending') return;
+  const ending = text || fallbackStoryEnding();
+  const lastNode = storyState.node || {};
+  // 结局也走剧情卡 + 画板：旁白文案挂在 node 上，画面必须落在画板容器里
+  storyState.node = {
+    scene: '大结局',
+    narration: ending,
+    a: '',
+    b: '',
+    c: '',
+    d: '',
+    emotion: lastNode.emotion || 'happy',
+  };
+  pushStoryBoard();
+  log('info', `互动剧场大结局：${ending}`);
+
+  // 结局画面在后台画，不再等画板画完才开口：画板先显示「正在画大结局」，
+  // 画面备好后自己补上；作画和语音同时进行，口播不会被画板拖慢
+  requestStoryDrawing(storyState.step, storyState.node, runId, { ending: true, timeoutMs: 20000 }).catch(() => {});
+
+  // 气泡停留时长跟结局字数走，避免念到一半气泡先消失
+  const holdMs = Math.min(30000, Math.max(12000, ending.length * 220));
+  dshBroadcast(`【互动剧场·大结局】${ending}`, {
+    force: true,
+    anim: true,
+    duration: holdMs,
+    storyLine: true,
+  });
+  const anim = storyEmotionAnim(storyState.node.emotion);
+  if (anim) dshAnim(anim, null, { force: true });
+
+  await waitForStorySpeech(ending);
+  if (runId !== storyRunId || !storyState.active) return;
+  endStory(runId);
+}
+
+function endStory(runId) {
+  if (runId !== storyRunId) return;
+  const topic = storyState.topic;
+  closeStory(storyState);
+  pushStoryBoard();
+  const text = `互动剧场「${topic}」完满收场！谢谢陪它走到最后的每一个人，下一场想看什么，评论区告诉我～`;
+  dshBroadcast(text, { force: true, anim: true, duration: 9000, storyLine: true });
+  speakDsh(text, { priority: SPEECH_PRIORITY.chat, storyLine: true });
+  log('info', `互动剧场结束：${storyDigest({ ...storyState, phase: '已结束' })}`);
+  restoreSongVolume();
+}
+
+/** 中止当前剧情：清掉所有定时器并让在途的 AI 回调失效 */
+function stopStory(reason = '') {
+  storyRunId += 1;
+  if (storyVoteTimer) {
+    clearTimeout(storyVoteTimer);
+    storyVoteTimer = 0;
+  }
+  const wasActive = storyState.active;
+  // 中止时连正在念的剧情语音一起停掉，等待中的流程会拿到 interrupted 结果后按 runId 直接退出
+  if (wasActive) hushSpeechForStory();
+  closeStory(storyState);
+  storyState.node = null;
+  pushStoryBoard();
+  if (wasActive && reason) log('info', `互动剧场已中止：${reason}`);
+  if (wasActive) restoreSongVolume();
+}
+
+/** 投票口令拦截：剧场期间 A / B / C / D / 1~4 一律静默，不进入动作、点歌、闲聊，也不发任何直播间回复 */
+function handleStoryVote(event) {
+  if (!storyState.active || event.type !== 'chat') return false;
+  const choice = parseVoteChoice(event.content);
+  if (!choice) return false;
+  // 只有投票窗口内的口令计入票数；旁白/结算阶段的同类口令直接丢弃，仍然不回复
+  if (storyState.phase !== 'voting') return true;
+  const user = event.user || {};
+  const key = String(user.id || user.nickname || '').trim();
+  if (!key) return true;
+  const result = recordVote(storyState, choice, key);
+  if (result.ok) pushStoryBoard();
+  return true;
+}
+
+/**
+ * 观众收场口令「结束剧场」：正在演就提前收场并让桌宠道别；没在演也静默吞掉，不进入闲聊/动作。
+ * 只由主面板执行，副面板同样吞掉口令，避免多面板重复收场。
+ */
+function handleStoryStopCommand(event) {
+  if (event.type !== 'chat') return false;
+  if (!isStoryStopCommand(event.content)) return false;
+  if (isLeader && storyState.active) {
+    const name = String((event.user && (event.user.nickname || event.user.id)) || '观众').trim();
+    stopStory(`${name} 发「结束剧场」`);
+    const text = '剧场已按大家的要求提前收场啦～谢谢陪它演到这里的每一个人，下一场马上安排！';
+    dshBroadcast(text, { force: true, anim: true, duration: 8000, storyLine: true });
+    speakDsh(text, { priority: SPEECH_PRIORITY.chat, storyLine: true });
+  }
+  return true;
+}
+
+/**
+ * 弹幕点播「剧场xxxx」：观众发口令即可开一场指定主题的短剧，后续全部由桌宠接管。
+ * 剧场期间/冷却期内/非主面板一律静默吞掉，避免刷屏和重复开演。
+ */
+function handleStoryCommand(event) {
+  if (event.type !== 'chat') return false;
+  const text = String(event.content || '').trim();
+  if (!text || text.length > 26) return false;
+  const cfg = state.settings.storyTheater || {};
+  if (cfg.enabled === false) return false;
+  const topic = parseStoryCommand(text);
+  if (!topic) return false;
+  const unsafe = findUnsafeStoryWord(topic);
+  if (unsafe) {
+    log('info', `互动剧场点播被拦截：主题含「${unsafe}」`);
+    return true;
+  }
+  if (!isLeader || storyState.active || storyStarting) return true;
+  if (state.settings.serviceEnabled === false) return true;
+  if (Date.now() - lastStoryRequestAt < STORY_REQUEST_COOLDOWN_MS) return true;
+  const ai = state.settings.ai || {};
+  if (!ai.apiKey || !ai.baseUrl || !ai.model) return true;
+  if (!state.settings.board.enabled && !(dshPet && state.settings.dshPet.enabled)) return true;
+  if (!state.lastFrameAt || Date.now() - state.lastFrameAt > 10 * 60 * 1000) return true;
+  startStoryRound({ manual: true, topic })
+    .then((result) => {
+      if (result && result.ok) lastStoryRequestAt = Date.now();
+    })
+    .catch(() => {});
+  return true;
+}
+
+/**
+ * 手动剧情指令：本面板不是主面板时转发给主面板执行。
+ * 主面板负责唱歌/回帖/发音，剧情也必须只由它演，否则两个面板会同时出声。
+ */
+function storyCommandOnLeader(command) {
+  if (isLeader) {
+    return command === 'stop'
+      ? Promise.resolve(stopStory('主播手动结束') || { ok: true })
+      : startStoryRound({ manual: true });
+  }
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'dy-leader-story', command }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          resolve({ ok: false, error: '主面板没有响应，请关掉多余的扩展面板后重试' });
+          return;
+        }
+        resolve(response);
+      });
+    } catch {
+      resolve({ ok: false, error: '主面板没有响应，请关掉多余的扩展面板后重试' });
+    }
+  });
+}
+
+/**
+ * 互动剧场开演时把 QQ 音乐压到 10%，演完恢复原音量。
+ * 音乐没在播放或桥接没连上时静默跳过，不影响剧情。
+ */
+let storyVolumeRestore = 0;
+const STORY_SONG_VOLUME = 10;
+
+async function duckSongVolume() {
+  storyVolumeRestore = 0;
+  try {
+    const response = await fetch(`${songRequestUrl()}/api/song/volume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'set', value: STORY_SONG_VOLUME }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const result = await response.json();
+    if (!result || !result.ok) return;
+    const previous = Number(result.previous);
+    if (Number.isFinite(previous) && previous > STORY_SONG_VOLUME) {
+      storyVolumeRestore = previous;
+      log('info', `互动剧场：音乐音量从 ${previous}% 压到 ${STORY_SONG_VOLUME}%`);
+    }
+  } catch {
+    storyVolumeRestore = 0;
+  }
+}
+
+async function restoreSongVolume() {
+  const target = storyVolumeRestore;
+  storyVolumeRestore = 0;
+  if (!target) return;
+  try {
+    await fetch(`${songRequestUrl()}/api/song/volume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'set', value: target }),
+      signal: AbortSignal.timeout(8000),
+    });
+    log('info', `互动剧场：音乐音量已恢复到 ${target}%`);
+  } catch {
+    /* 恢复失败不阻塞剧情收尾 */
+  }
+}
+
+async function startStoryRound(options = {}) {
+  if (storyStarting || storyState.active) {
+    return { ok: false, error: '上一场剧情还没演完' };
+  }
+  const cfg = state.settings.storyTheater || {};
+  if (!options.manual && cfg.enabled === false) return { ok: false, error: '未开启互动剧场' };
+  if (state.settings.serviceEnabled === false) return { ok: false, error: '服务已停用' };
+  if (!isLeader) return { ok: false, error: '请等主面板接管后再试' };
+  const ai = state.settings.ai || {};
+  if (!ai.apiKey || !ai.baseUrl || !ai.model) {
+    return { ok: false, error: '互动剧场需要先配置 AI 接口' };
+  }
+  // 桌宠只是加分表演：没连桌宠时，只要背景板开着照样能演、能投票
+  if (!state.settings.board.enabled && !(dshPet && state.settings.dshPet.enabled)) {
+    return { ok: false, error: '互动剧场需要打开背景板，或先连接桌宠' };
+  }
+  // 两套玩法都占背景板主舞台，剧场开演前先安静收掉正在进行的画画
+  if (drawState.active) stopDrawGame('互动剧场开演', { announce: false });
+
+  storyStarting = true;
+  const runId = ++storyRunId;
+  const requested = String(options.topic || cfg.topic || '').trim();
+  const blocked = findUnsafeStoryWord(requested);
+  if (blocked) log('warn', `互动剧场主题含敏感内容（${blocked}），已换成安全题材`);
+  const topic = resolveStoryTopic(blocked ? '' : requested);
+  // 本场幕数在 4～6 幕之间随机，beginStory 里一起定下
+  beginStory(storyState, topic);
+  rememberStorySchedule(Date.now());
+  pushStoryBoard();
+  storyStarting = false;
+
+  log('info', `互动剧场开演：${topic}（共 ${storyState.maxSteps} 幕）`);
+  duckSongVolume();
+  hushSpeechForStory();
+  dshBroadcast(`【互动剧场开演】今天的故事是「${topic}」，发 A / B / C / D 就能左右剧情！`, {
+    force: true,
+    anim: true,
+    duration: 10000,
+    storyLine: true,
+  });
+  // 开场白念完再进第一幕，避免开场语音和第一幕旁白挤在一起
+  waitForStorySpeech(`互动剧场开演啦！今天的故事是${topic}，发A、B、C或者D就能左右剧情！`)
+    .then(() => {
+      if (runId !== storyRunId || !storyState.active) return;
+      runStoryNode(1, runId).catch(() => {});
+    })
+    .catch(() => {});
+  return { ok: true, topic };
+}
+
+/** 自动开演间隔（分钟），与设置页的取值范围保持一致 */
+function storyIntervalMin() {
+  const cfg = state.settings.storyTheater || {};
+  return Math.max(20, Math.min(240, Number(cfg.autoIntervalMin) || 90));
+}
+
+/**
+ * 直播间是否有人：抖音的在线人数偶尔缺报或显示 0，
+ * 这时只要最近有观众名单、弹幕/礼物等直播事件，就认为直播间是活的。
+ */
+function storyAudiencePresent() {
+  if (Number(state.stats.online) > 0) return true;
+  if (state.audience.size && state.audienceAt && Date.now() - state.audienceAt < STORY_AUDIENCE_FRESH_MS) return true;
+  return state.eventTimes.length > 0;
+}
+
+/** 自动开演被挡住的原因；全部条件满足时返回空串 */
+function storyAutoBlocker() {
+  if (!isLeader) return '等待主面板接管';
+  if (state.settings.serviceEnabled === false) return '服务已停用';
+  if (!state.settings.board.enabled && !(dshPet && state.settings.dshPet.enabled)) return '背景板和桌宠都没有开启';
+  const ai = state.settings.ai || {};
+  if (!ai.apiKey || !ai.baseUrl || !ai.model) return '还没配置 AI 接口';
+  if (!state.lastFrameAt) return '还没收到直播间数据';
+  if (Date.now() - state.lastFrameAt > 10 * 60 * 1000) return '直播间超过 10 分钟没有数据，可能没在直播';
+  if (!storyAudiencePresent()) return '直播间暂时没有检测到观众';
+  if (state.warmupBusy || state.aiBusy) return 'AI 正在忙别的事情';
+  return '';
+}
+
+/** 距下一场自动开演的剩余毫秒：没有历史计时的首场最多只等 20 分钟 */
+function storyAutoRemainMs(now = Date.now()) {
+  const intervalMs = storyIntervalMin() * 60 * 1000;
+  if (storyScheduleFresh) return Math.max(0, storyBootAt + Math.min(intervalMs, STORY_FIRST_RUN_MS) - now);
+  return Math.max(0, lastStoryAt + intervalMs - now);
+}
+
+/** 自动开演的可读状态：设置页用它显示倒计时和暂缓原因 */
+function storyAutoStatus() {
+  const cfg = state.settings.storyTheater || {};
+  const intervalMin = storyIntervalMin();
+  const remainMs = storyAutoRemainMs();
+  const base = {
+    enabled: cfg.enabled !== false,
+    active: Boolean(storyState.active),
+    intervalMin,
+    remainMs,
+    lastAt: lastStoryAt,
+    nextAt: Date.now() + remainMs,
+  };
+  if (cfg.enabled === false) return { ...base, state: 'off', text: '自动开演已关闭' };
+  if (storyState.active || storyStarting) {
+    const scene = storyState.node && storyState.node.scene ? ` · ${storyState.node.scene}` : '';
+    return { ...base, state: 'active', text: `正在演出${scene}` };
+  }
+  const blocker = storyAutoBlocker();
+  if (blocker) return { ...base, state: 'paused', text: `自动开演暂缓：${blocker}` };
+  if (remainMs <= 0) return { ...base, state: 'ready', text: '条件已满足，下一场马上开演' };
+  const mins = Math.ceil(remainMs / 60000);
+  const text = storyScheduleFresh
+    ? `距首场自动开演约 ${mins} 分钟（之后每 ${intervalMin} 分钟一场）`
+    : `距下次自动开演约 ${mins} 分钟（每 ${intervalMin} 分钟一场）`;
+  return { ...base, state: 'waiting', text };
+}
+
+/** 暂缓原因限频：同一原因 10 分钟内只记一条，避免 20 秒刷一次日志 */
+function noteStoryAutoSkip(reason) {
+  const now = Date.now();
+  if (reason === storyAutoNote && now - storyAutoNoteAt < 10 * 60 * 1000) return;
+  storyAutoNote = reason;
+  storyAutoNoteAt = now;
+  log('info', `互动剧场自动开演暂缓：${reason}`);
+}
+
+/**
+ * 演出卡死看门狗上限：按幕数放宽（每幕最多约 4 分钟，另留 10 分钟余量），
+ * 4 幕约 26 分钟、6 幕约 34 分钟，既能兜住接口卡死，又不会误杀正常的长剧。
+ */
+function storyStuckMs() {
+  const acts = Math.max(4, Number(storyState.maxSteps) || 4);
+  return 10 * 60 * 1000 + acts * 4 * 60 * 1000;
+}
+
+/** 自动开演的触发检查：在直播中、间隔到了再演 */
+function maybeStartStory() {
+  // 演出卡死看门狗：语音接口没回、AI 请求超时等极端情况会让 active 永远为真，
+  // 超过上限直接收场，保证后面的自动开演不会被一场演出永久挡住。
+  if (storyState.active && storyState.startedAt && Date.now() - storyState.startedAt > storyStuckMs()) {
+    log('warn', `互动剧场演出超过 ${Math.round(storyStuckMs() / 60000)} 分钟仍未收场，已自动中止`);
+    stopStory('演出超时');
+  }
+  if (state.settings.storyTheater && state.settings.storyTheater.enabled === false) return;
+  if (storyState.active || storyStarting) return;
+  if (!isLeader) return;
+  const blocker = storyAutoBlocker();
+  if (blocker) {
+    noteStoryAutoSkip(blocker);
+    return;
+  }
+  if (storyAutoRemainMs() > 0) return;
+  storyAutoNote = '';
+  storyAutoNoteAt = 0;
+  startStoryRound()
+    .then((result) => {
+      if (!result || !result.ok) noteStoryAutoSkip((result && result.error) || '开演失败');
+    })
+    .catch((error) => noteStoryAutoSkip(error && error.message ? error.message : '开演失败'));
+}
+
 /* ---------------- 语音队列：按优先级排队，播放中的语音不被打断 ---------------- */
 // 优先级从高到低：1 送礼感谢 > 2 记忆回复 > 3 点歌结果 > 4 闲聊 > 5 进场欢迎/暖场
 const speechQueue = [];
@@ -3583,71 +4874,130 @@ let speechBusy = false;
 let speechCurrentPriority = 0;
 let speechProtected = false;
 let speechGeneration = 0;
+let currentSpeechItem = null;
 
+/** 结算一条语音的等待 Promise：自然播完、被打断、被清场都算结束，等待方不会永远挂着 */
+function settleSpeechItem(item, reason = 'done') {
+  if (!item || item.settled) return;
+  item.settled = true;
+  item.resolve(reason);
+}
+
+/** 清空排队中的语音，并让每条的等待方立即拿到结果 */
+function clearSpeechQueue(reason = 'cleared') {
+  const pending = speechQueue.splice(0, speechQueue.length);
+  for (const item of pending) settleSpeechItem(item, reason);
+  return pending.length;
+}
+
+/**
+ * 入队播放一段语音。
+ * @returns {Promise<'done'|'error'|'interrupted'|'cleared'|'skipped'|'empty'|'dropped'>} 真正播放结束（或被停止）后 resolve
+ */
 function queueSpeech(text, options = {}) {
-  const content = String(text || '').replace(/@/g, '').slice(0, 120);
-  if (!content) return;
+  // 互动剧场进行中桌宠只念剧情，不再读弹幕/送礼/点歌；直播间文字回复照常发送
+  if (storyState.active && !options.storyLine) return Promise.resolve('skipped');
+  // 剧情台词可能很长（结局），单独放宽上限，避免念到一半被截断
+  const limit = options.storyLine ? 600 : 120;
+  const content = String(text || '').replace(/@/g, '').slice(0, limit);
+  if (!content) return Promise.resolve('empty');
   const priority = normalizeSpeechPriority(options.priority);
-  const item = { text: content, priority, protected: priority === SPEECH_PRIORITY.memory };
+  let resolve = () => {};
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  const item = {
+    text: content,
+    priority,
+    protected: priority === SPEECH_PRIORITY.memory,
+    // 剧情台词合成时间更长，给 MiniMax 多一点余量
+    storyLine: Boolean(options.storyLine),
+    promise,
+    resolve,
+    settled: false,
+  };
   if (!speechBusy) {
     runSpeech(item);
-    return;
+    return promise;
   }
   // 送礼、记忆、点歌结果可以打断闲聊/欢迎；记忆和送礼播放中不被覆盖
   if (shouldInterrupt(priority, speechCurrentPriority, speechProtected)) {
     interruptSpeech();
     runSpeech(item);
-    return;
+    return promise;
   }
   insertByPriority(speechQueue, item);
+  // 队列超上限时新语音可能被挤掉，等待方必须立刻拿到结果，避免流程卡死
+  if (!speechQueue.includes(item)) settleSpeechItem(item, 'dropped');
+  return promise;
 }
 
-function interruptSpeech() {
+/** 开演前清场：停掉正在念的弹幕，并清空排队中的语音 */
+function hushSpeechForStory() {
+  clearSpeechQueue('cleared');
+  if (speechBusy) interruptSpeech();
+}
+
+function interruptSpeech(reason = 'interrupted') {
   speechGeneration += 1; // 让被打断那条的结束回调失效，避免它继续推进队列
+  const interrupted = currentSpeechItem;
+  currentSpeechItem = null;
   speechBusy = false;
   speechCurrentPriority = 0;
   speechProtected = false;
-  stopMiniMaxTts();
+  settleSpeechItem(interrupted, reason);
+  stopTts();
 }
 
 function runSpeech(item) {
   const generation = ++speechGeneration;
+  currentSpeechItem = item;
   speechBusy = true;
   speechCurrentPriority = item.priority;
   speechProtected = Boolean(item.protected);
-  const finish = () => {
-    if (generation !== speechGeneration) return;
+  const finish = (reason = 'done') => {
+    // 被新的语音打断时只结算自己，队列推进由新语音负责
+    if (generation !== speechGeneration) {
+      settleSpeechItem(item, 'interrupted');
+      return;
+    }
     speechBusy = false;
+    currentSpeechItem = null;
     speechCurrentPriority = 0;
     speechProtected = false;
+    settleSpeechItem(item, reason);
     const next = speechQueue.shift();
     if (next) runSpeech(next);
   };
-  speakMiniMax(item.text, state.settings, {
+  speakTts(item.text, state.settings, {
     fallbackToBrowser: Boolean(state.settings.tts.fallbackBrowser),
+    timeoutMs: item.storyLine ? 30000 : undefined,
+    // 同一份音频顺手推给背景板，让舞台上的桌宠也开口（不额外消耗服务商额度）
+    onAudio: (audio, mime) => postBoardVoice(item.text, audio, mime),
   })
     .then((result) => {
       if (generation !== speechGeneration) return;
       if (result && result.provider === 'browser') {
-        log('warn', 'MiniMax 语音失败，已回退浏览器机械音；请检查 TTS 设置');
+        log('warn', '语音合成失败，已回退浏览器机械音；请检查 TTS 设置');
       }
-      if (result && result.done) result.done.then(finish, finish);
-      else finish();
+      // done 在音频 ended / 被停止时 resolve，这里等它才代表「真的播完」
+      if (result && result.done) result.done.then(() => finish('done'), () => finish('error'));
+      else finish(result && result.ok ? 'done' : 'error');
     })
     .catch((error) => {
       if (generation !== speechGeneration) return;
       if (Date.now() - state.lastTtsErrorAt > 15000) {
         state.lastTtsErrorAt = Date.now();
-        log('warn', `MiniMax 语音失败：${error.message}`);
+        log('warn', `语音合成失败：${error.message}`);
       }
-      finish();
+      finish('error');
     });
 }
 
 function speakDsh(text, options = {}) {
-  if (!isLeader || !state.settings.dshPet.enabled || !state.settings.dshPet.tts) return;
+  if (!isLeader || !state.settings.dshPet.enabled || !state.settings.dshPet.tts) return Promise.resolve('skipped');
   // 语音不念 @：直接删除 @ 符号（昵称含中文，不能用 \w 匹配）
-  queueSpeech(text, options);
+  return queueSpeech(text, options);
 }
 
 function speakProtected(text) {
@@ -3659,7 +5009,7 @@ async function testTts(ttsOverride) {
     ? mergeSettings({ ...state.settings, tts: { ...state.settings.tts, ...ttsOverride } })
     : state.settings;
   try {
-    const result = await speakMiniMax(
+    const result = await speakTts(
       '主人你好呀，我是你的桌宠小女仆，今天也要一起开开心心直播哦～',
       settings,
       { fallbackToBrowser: false },
@@ -3698,7 +5048,7 @@ function handleDshActionCommand(event) {
     const candidates = pool.length > 1 ? pool.filter((item) => item !== lastDshActionName) : pool;
     name = candidates[Math.floor(Math.random() * candidates.length)];
   }
-  // 「token回」类口令固定执行 token来 动画，并回「token来！token来！」
+  // 「token回」类口令固定执行 token来 动画，并回「token来，token来」
   const tokenBack = isTokenBackKeyword(keyword);
   if (tokenBack) name = resolvePetAction('token来', dshPet.animations) || name;
   lastDshActionName = name;
@@ -3762,8 +5112,11 @@ function handleDshEvent(event) {
     const nickname = (event.user && event.user.nickname) || '观众';
     const count = Number(event.gift && event.gift.count) || 1;
     const display = safeNickname(nickname, '');
+    // 5 级以上的老饭友被点名「又喂饭」，普通观众保持原来的感谢口吻
+    const record = state.viewers.get(String((event.user && (event.user.id || event.user.nickname)) || ''));
+    const tail = intimacyGiftTail(record);
     const text = display
-      ? `谢谢 @${display} 的白饭${count > 1 ? ` ×${count}` : ''}！`
+      ? `谢谢 @${display} 的白饭${count > 1 ? ` ×${count}` : ''}！${tail}`
       : `谢谢这位朋友的白饭${count > 1 ? ` ×${count}` : ''}！`;
     dshBroadcast(text, {
       force: true,
@@ -3802,16 +5155,24 @@ function handleDshEvent(event) {
     lastDshMemberAt = Date.now();
     const userKey = String((event.user && (event.user.id || event.user.nickname)) || nickname);
     // 检索顺序：单场有记录 → 本地记住的观众 → 跨直播记忆里的重要观众
+    const cross = findCrossViewer(event.user);
     const returning =
       hasViewerMemory(state.viewers.get(userKey)) ||
       state.knownViewers.has(userKey) ||
-      Boolean(findCrossViewer(event.user));
-    const text = returning
-      ? `@${nickname}，你又来看鲸鱼娘啦！我记得你哦！`
-      : `@${nickname} 欢迎来到直播间～`;
-    dshBroadcast(text, { anim: true, duration: 6000 });
+      Boolean(cross);
+    const display = safeNickname(nickname, '这位朋友');
+    // 老朋友重逢彩蛋：跨直播记忆里说出 TA 上次点了什么歌、送了多少礼物
+    const reunion = returning && cross ? buildReunionLine({ viewer: cross, nickname: display }) : '';
+    // 固定欢迎语保持不变，只在后面补一句亲密度称呼，高等级观众有专属感
+    const intimacyTail = returning ? intimacyWelcomeTail(state.viewers.get(userKey)) : '';
+    const base = returning
+      ? reunion || `@${display}，你又来看鲸鱼娘啦！我记得你哦！`
+      : `@${display} 欢迎来到直播间～`;
+    const text = intimacyTail ? `${base}${intimacyTail}` : base;
+    dshBroadcast(text, { anim: true, duration: returning ? 9000 : 6000 });
     dshAnim('点击回应-元气挥手');
     speakDsh(text, { priority: SPEECH_PRIORITY.welcome });
+    if (reunion) log('info', `老朋友重逢：${display} → ${reunion}`);
   }
 }
 
@@ -3869,6 +5230,7 @@ async function loadViewerHistory() {
         name: String(item.name || ''),
         lastSeen: Number(item.lastSeen) || 0,
         followedAt: Number(item.followedAt) || 0,
+        intimacy: normalizeIntimacy(item.intimacy),
       });
     }
   } catch {
@@ -3893,6 +5255,7 @@ function saveViewerHistory() {
       name: (item && item.name) || '',
       lastSeen: Number(item && item.lastSeen) || 0,
       followedAt: Number(item && item.followedAt) || 0,
+      intimacy: normalizeIntimacy(item && item.intimacy),
     });
   }
   for (const [key, record] of state.viewers) {
@@ -3903,6 +5266,8 @@ function saveViewerHistory() {
       name: record.name || prev.name || '',
       lastSeen: record.lastSeen || prev.lastSeen || Date.now(),
       followedAt: Number(record.followedAt) || Number(prev.followedAt) || 0,
+      // 单场记录里的亲密度是最新的，没有时沿用本地历史
+      intimacy: normalizeIntimacy(record.intimacy || prev.intimacy),
     });
   }
   const users = [...merged.values()]
@@ -3918,24 +5283,26 @@ function saveViewerHistory() {
     .catch(() => {});
 }
 
-function rememberViewer(event) {
-  if (!event || !['chat', 'member', 'gift', 'follow', 'like'].includes(event.type)) return;
-  if (isOwnEvent(event)) return;
+function rememberViewer(event, options = {}) {
+  if (!event || !['chat', 'member', 'gift', 'follow', 'like'].includes(event.type)) return null;
+  if (isOwnEvent(event)) return null;
   const user = event.user || {};
   const name = String(user.nickname || '').trim();
-  if (!name) return;
+  if (!name) return null;
   if (state.settings.myNickname && name.toLowerCase() === String(state.settings.myNickname).toLowerCase()) {
-    return;
+    return null;
   }
-  if (state.settings.myUserId && String(user.id || '') === String(state.settings.myUserId)) return;
+  if (state.settings.myUserId && String(user.id || '') === String(state.settings.myUserId)) return null;
   if ((state.settings.blockedUsers || []).some((item) => String(item) === name || String(item) === String(user.id || ''))) {
-    return;
+    return null;
   }
   const key = String(user.id || name);
   const now = Date.now();
+  const known = state.knownViewers.get(key);
+  const existing = state.viewers.get(key);
   // 本场、本地历史、跨直播记忆都没有记录 → 第一次出现在直播间，AI 回复里更容易触发昵称接梗欢迎
-  event.viewerNew = !state.viewers.has(key) && !state.knownViewers.has(key) && !findCrossViewer(user);
-  const record = state.viewers.get(key) || {
+  event.viewerNew = !existing && !known && !findCrossViewer(user);
+  const record = existing || {
     key,
     name,
     id: String(user.id || ''),
@@ -3947,26 +5314,53 @@ function rememberViewer(event) {
     followedAt: 0,
     likes: 0,
     likedAt: 0,
+    // 插件刷新后单场记忆清空，亲密度从本地观众历史恢复，跨场次继续累计
+    intimacy: normalizeIntimacy(known && known.intimacy),
   };
+  // 旧存档 / 旧对象没有亲密度字段时补齐，避免第一次计分报错
+  if (!record.intimacy) record.intimacy = normalizeIntimacy(known && known.intimacy);
   record.name = name;
   record.lastSeen = now;
   // 抖音用户数据自带关注关系时，第一次识别就记一笔，方便核对是谁被判定为已关注
   const followedByPayload = !Number(record.followedAt) && userFollowedAnchor(user);
   recordViewerEvent(record, event, now);
   if (followedByPayload) log('info', `识别到已关注观众：${safeNickname(name, '观众')}（来源：抖音用户数据）`);
-  // 只记录有发言/送礼/点歌/关注/点赞的观众；单纯进场不进入单场记忆
-  if (!hasViewerMemory(record)) return;
+  // 亲密度按观众分人累计；点歌在点歌成功后单独记分
+  const award = intimacyAwardForEvent(event, options.giftRice || 0);
+  const intimacyResult = award ? applyIntimacyAward(record, award.source, award.amount, now) : null;
+  if (intimacyResult && intimacyResult.levelUp) announceIntimacyLevelUp(record, intimacyResult);
+  // 只记录有发言/送礼/点歌/关注/点赞/亲密度的观众；单纯进场不进入单场记忆
+  if (!hasViewerMemory(record)) return null;
   // 扩展重载后单场记忆会清空，关注状态从本地观众历史里恢复
-  const known = state.knownViewers.get(key);
   if (!record.followedAt && known && Number(known.followedAt)) record.followedAt = Number(known.followedAt);
   state.viewers.set(key, record);
   state.knownViewers.set(key, {
     name,
     lastSeen: now,
     followedAt: Number(record.followedAt) || Number(known && known.followedAt) || 0,
+    intimacy: record.intimacy,
   });
   scheduleViewerHistorySave();
   while (state.viewers.size > 100) state.viewers.delete(state.viewers.keys().next().value);
+  return record;
+}
+
+/** 亲密度升级：桌宠播报 + 背景板弹一条，语气跟送礼感谢一致。 */
+function announceIntimacyLevelUp(record, award) {
+  const display = safeNickname(record && record.name, '');
+  const text = display ? levelUpLine(display, award) : '';
+  if (!text) return;
+  postPet({ kind: 'intimacy_up', room: roomInfo(), data: { name: display, level: award.level, title: award.title, color: award.color } });
+  dshBroadcast(text, { force: true, anim: true, duration: 8000 });
+  speakDsh(text, { priority: SPEECH_PRIORITY.chat });
+  log('info', `亲密度升级：${display} → Lv.${award.level} ${award.title}（${award.points} 分）`);
+}
+
+/** 点歌成功后补记亲密度（点歌 +5），和送礼一样按人累计。 */
+function awardViewerSongIntimacy(record) {
+  if (!record) return;
+  const result = applyIntimacyAward(record, 'song', intimacyAwardForSong().amount, Date.now());
+  if (result && result.levelUp) announceIntimacyLevelUp(record, result);
 }
 
 function pickWarmupViewer() {
@@ -3985,6 +5379,8 @@ function pickWarmupViewer() {
 
 function maybeWarmup(now) {
   if (state.settings.serviceEnabled === false) return;
+  // 互动剧场进行中不插入暖场，避免抢走剧情旁白的语音和画面
+  if (storyState.active) return;
   if (now - state.lastWarmupCheck < 5000) return;
   state.lastWarmupCheck = now;
 
@@ -4579,6 +5975,10 @@ async function init() {
   setInterval(() => {
     maybeAutoSong().catch(() => {});
   }, 5000);
+  // 互动剧场：每 20 秒检查一次是否到了自动开演的时间
+  setInterval(() => {
+    maybeStartStory();
+  }, 20_000);
   // 每 30 秒让大模型审核一遍点歌队列，违规歌曲自动移除并拉黑点歌人
   setInterval(() => {
     auditSongQueue().catch(() => {});

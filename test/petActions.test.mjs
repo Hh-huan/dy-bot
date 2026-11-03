@@ -93,11 +93,11 @@ test('token回 相关口令回复固定台词并触发 token来 动作', () => {
   assert.equal(resolvePetAction('回token', animations), 'token来');
   assert.equal(resolvePetAction('token回来', animations), 'token来');
   assert.equal(resolvePetAction('token还我', animations), 'token来');
-  assert.equal(petActionSpeech('token回', 'token来', '小明'), 'token来！token来！');
+  assert.equal(petActionSpeech('token回', 'token来', '小明'), 'token来，token来');
   assert.equal(petActionSpeech('把token还回来', 'token来', '小明'), TOKEN_BACK_REPLY);
   assert.equal(isTokenBackKeyword('token回'), true);
   assert.equal(isTokenBackKeyword('token来'), false);
-  assert.equal(TOKEN_BACK_REPLY, 'token来！token来！');
+  assert.equal(TOKEN_BACK_REPLY, 'token来，token来');
 });
 
 test('空闲动作会同步说给大家表演', () => {

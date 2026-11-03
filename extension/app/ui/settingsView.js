@@ -2,7 +2,19 @@
 import { $, confirmAction, toast } from './dom.js';
 import { clamp, debounce, splitLines } from '../core/util.js';
 import { AI_PROVIDERS, generateAiReply, providerPreset } from '../core/ai.js';
-import { DEFAULT_TTS_VOICE, TTS_VOICES } from '../core/minimaxTts.js';
+import {
+  DEFAULT_MIMO_MODEL,
+  DEFAULT_MIMO_VOICE,
+  DEFAULT_TTS_VOICE,
+  DEFAULT_VOICE_DESIGN,
+  MIMO_MODELS,
+  MIMO_VOICES,
+  TTS_PROVIDERS,
+  TTS_VOICES,
+  VOICE_DESIGN_MODEL,
+  mimoModel,
+  ttsProvider,
+} from '../core/minimaxTts.js';
 
 const ids = {
   myRoomUrl: '#setMyRoomUrl',
@@ -32,8 +44,11 @@ const ids = {
   dshIdleAnim: '#setDshIdleAnim',
   dshActionCommands: '#setDshActionCommands',
   dshLikeThanks: '#setDshLikeThanks',
+  ttsProvider: '#setTtsProvider',
+  ttsMimoModel: '#setTtsMimoModel',
   ttsVoice: '#setTtsVoice',
   ttsVoiceCustom: '#setTtsVoiceCustom',
+  ttsStyle: '#setTtsStyle',
   ttsKey: '#setTtsKey',
   warmupEnabled: '#setWarmupEnabled',
   warmupIdle: '#setWarmupIdle',
@@ -48,6 +63,14 @@ const ids = {
   boardObsUrl: '#boardObsUrl',
   boardPetSlot: '#setBoardPetSlot',
   boardBubbles: '#setBoardBubbles',
+  storyEnabled: '#setStoryEnabled',
+  storyTopic: '#setStoryTopic',
+  storyInterval: '#setStoryInterval',
+  storyPrompt: '#setStoryPrompt',
+  storyAutoStatus: '#storyAutoStatus',
+  drawEnabled: '#setDrawEnabled',
+  drawRoundSec: '#setDrawRoundSec',
+  drawRounds: '#setDrawRounds',
   songEnabled: '#setSongEnabled',
   songPrefix: '#setSongPrefix',
   songMinPlay: '#setSongMinPlay',
@@ -138,19 +161,71 @@ export function initSettingsView(ctx) {
     node('aiFallbackProvider').append(new Option(provider.label, value));
   }
 
-  for (const voice of TTS_VOICES) {
-    node('ttsVoice').append(new Option(voice.label, voice.id));
+  for (const [value, provider] of Object.entries(TTS_PROVIDERS)) {
+    node('ttsProvider').append(new Option(provider.label, value));
   }
-  node('ttsVoice').append(new Option('自定义 voice_id…', '__custom__'));
 
-  function syncTtsVoiceField() {
+  for (const model of MIMO_MODELS) {
+    node('ttsMimoModel').append(new Option(model.label, model.id));
+  }
+
+  /** 按服务商返回可选音色列表：两家平台的音色 id 互不通用。 */
+  function ttsVoicesFor(provider) {
+    return provider === 'mimo' ? MIMO_VOICES : TTS_VOICES;
+  }
+
+  function syncTtsVoiceField(provider) {
+    const voiceDesign = provider === 'mimo' && node('ttsMimoModel').value === VOICE_DESIGN_MODEL;
     const custom = node('ttsVoice').value === '__custom__';
     const field = $('#ttsCustomVoiceField');
-    if (field) field.hidden = !custom;
+    if (field) field.hidden = !custom || voiceDesign;
     if (custom && !node('ttsVoiceCustom').value) {
-      node('ttsVoiceCustom').value = DEFAULT_TTS_VOICE;
+      node('ttsVoiceCustom').value = provider === 'mimo' ? DEFAULT_MIMO_VOICE : DEFAULT_TTS_VOICE;
     }
+    // 音色设计模型不支持 voice 参数，隐藏音色选择，改为必填的音色描述
+    const voiceField = $('#ttsVoiceField');
+    if (voiceField) voiceField.hidden = voiceDesign;
+    const styleField = $('#ttsStyleField');
+    if (styleField) styleField.hidden = provider !== 'mimo';
+    const styleLabel = $('#ttsStyleLabel');
+    if (styleLabel) {
+      styleLabel.textContent = voiceDesign ? '音色描述（音色设计模型必填）' : '风格指令（可选，仅 MiMo）';
+    }
+    node('ttsStyle').placeholder = voiceDesign
+      ? '低沉磁性的中文男声，语速偏慢，语气沉稳'
+      : '活泼甜美，语速稍快，句尾带点上扬';
+    const modelField = $('#ttsMimoModelField');
+    if (modelField) modelField.hidden = provider !== 'mimo';
   }
+
+  /** 切换服务商时重建音色下拉，避免把 MiniMax 的音色 id 带进 MiMo。 */
+  function renderTtsVoices(provider, selected) {
+    const voices = ttsVoicesFor(provider);
+    const fallback = provider === 'mimo' ? DEFAULT_MIMO_VOICE : DEFAULT_TTS_VOICE;
+    const value = selected || fallback;
+    node('ttsVoice').textContent = '';
+    for (const voice of voices) {
+      node('ttsVoice').append(new Option(voice.label, voice.id));
+    }
+    node('ttsVoice').append(new Option('自定义 voice_id…', '__custom__'));
+    const known = voices.some((voice) => voice.id === value);
+    node('ttsVoice').value = known ? value : fallback;
+    node('ttsVoiceCustom').value = known ? '' : value;
+    syncTtsVoiceField(provider);
+  }
+
+  node('ttsProvider').addEventListener('change', () => {
+    const provider = node('ttsProvider').value === 'mimo' ? 'mimo' : 'minimax';
+    renderTtsVoices(provider, provider === 'mimo' ? DEFAULT_MIMO_VOICE : DEFAULT_TTS_VOICE);
+  });
+
+  // 切到音色设计模型时，把空着的描述填成默认文案，避免用户不知道这里该填什么
+  node('ttsMimoModel').addEventListener('change', () => {
+    if (node('ttsMimoModel').value === VOICE_DESIGN_MODEL && !node('ttsStyle').value.trim()) {
+      node('ttsStyle').value = DEFAULT_VOICE_DESIGN;
+    }
+    syncTtsVoiceField(node('ttsProvider').value === 'mimo' ? 'mimo' : 'minimax');
+  });
 
   function boardBaseUrl() {
     const settings = ctx.getSettings();
@@ -221,12 +296,12 @@ export function initSettingsView(ctx) {
     renderDshState();
 
     const tts = settings.tts || {};
-    const voiceId = tts.voiceId || DEFAULT_TTS_VOICE;
-    const knownVoice = TTS_VOICES.some((voice) => voice.id === voiceId);
-    node('ttsVoice').value = knownVoice ? voiceId : '__custom__';
-    node('ttsVoiceCustom').value = knownVoice ? '' : voiceId;
+    const provider = ttsProvider(settings);
+    node('ttsProvider').value = provider;
+    node('ttsMimoModel').value = mimoModel(settings) || DEFAULT_MIMO_MODEL;
+    node('ttsStyle').value = tts.mimoStyle || '';
     node('ttsKey').value = tts.apiKey || '';
-    syncTtsVoiceField();
+    renderTtsVoices(provider, provider === 'mimo' ? tts.mimoVoice || DEFAULT_MIMO_VOICE : tts.voiceId || DEFAULT_TTS_VOICE);
 
     const warmup = settings.warmup || {};
     node('warmupEnabled').checked = Boolean(warmup.enabled);
@@ -238,6 +313,17 @@ export function initSettingsView(ctx) {
     node('warmupSpeak').checked = warmup.speak !== false;
     node('warmupPresets').value = Array.isArray(warmup.presets) ? warmup.presets.join('\n') : '';
     node('warmupPrompt').value = warmup.prompt || '';
+
+    const story = settings.storyTheater || {};
+    node('storyEnabled').checked = story.enabled !== false;
+    node('storyTopic').value = story.topic || '';
+    node('storyInterval').value = String(story.autoIntervalMin ?? 90);
+    node('storyPrompt').value = story.prompt || '';
+
+    const draw = settings.drawGuess || {};
+    node('drawEnabled').checked = draw.enabled !== false;
+    node('drawRoundSec').value = String(draw.roundSec ?? 60);
+    node('drawRounds').value = String(draw.maxRounds ?? 5);
 
     const board = settings.board || {};
     node('boardEnabled').checked = Boolean(board.enabled);
@@ -293,14 +379,23 @@ export function initSettingsView(ctx) {
         actionCommands: node('dshActionCommands').checked,
         likeThanks: node('dshLikeThanks').checked,
       },
-      tts: {
-        ...previous.tts,
-        voiceId:
+      tts: (() => {
+        const provider = node('ttsProvider').value === 'mimo' ? 'mimo' : 'minimax';
+        const picked =
           node('ttsVoice').value === '__custom__'
-            ? node('ttsVoiceCustom').value.trim() || DEFAULT_TTS_VOICE
-            : node('ttsVoice').value,
-        apiKey: node('ttsKey').value.trim(),
-      },
+            ? node('ttsVoiceCustom').value.trim()
+            : node('ttsVoice').value;
+        const voice = picked || (provider === 'mimo' ? DEFAULT_MIMO_VOICE : DEFAULT_TTS_VOICE);
+        return {
+          ...previous.tts,
+          provider,
+          mimoModel: node('ttsMimoModel').value === VOICE_DESIGN_MODEL ? VOICE_DESIGN_MODEL : DEFAULT_MIMO_MODEL,
+          ...(provider === 'mimo'
+            ? { mimoVoice: voice, mimoStyle: node('ttsStyle').value.trim() }
+            : { voiceId: voice }),
+          apiKey: node('ttsKey').value.trim(),
+        };
+      })(),
       warmup: {
         ...previous.warmup,
         enabled: node('warmupEnabled').checked,
@@ -325,6 +420,19 @@ export function initSettingsView(ctx) {
         enabled: node('boardEnabled').checked,
         petSlot: node('boardPetSlot').value || 'center',
         avatarBubbles: Math.round(clamp(Number(node('boardBubbles').value), 0, 30)),
+      },
+      storyTheater: {
+        ...previous.storyTheater,
+        enabled: node('storyEnabled').checked,
+        autoIntervalMin: Math.round(clamp(Number(node('storyInterval').value) || 90, 20, 240)),
+        topic: node('storyTopic').value.trim().slice(0, 30),
+        prompt: node('storyPrompt').value.trim(),
+      },
+      drawGuess: {
+        ...previous.drawGuess,
+        enabled: node('drawEnabled').checked,
+        roundSec: Math.round(clamp(Number(node('drawRoundSec').value) || 60, 30, 120)),
+        maxRounds: Math.round(clamp(Number(node('drawRounds').value) || 5, 3, 10)),
       },
       songRequest: {
         ...previous.songRequest,
@@ -377,7 +485,9 @@ export function initSettingsView(ctx) {
     aiStatus.className = `status-line ${kind}`;
   }
 
-  node('ttsVoice').addEventListener('change', syncTtsVoiceField);
+  node('ttsVoice').addEventListener('change', () => {
+    syncTtsVoiceField(node('ttsProvider').value === 'mimo' ? 'mimo' : 'minimax');
+  });
 
   testButton.addEventListener('click', async () => {
     const ai = collect().ai;
@@ -460,6 +570,98 @@ export function initSettingsView(ctx) {
     }
   });
 
+  $('#startStoryBtn').addEventListener('click', async () => {
+    const status = $('#storyStatus');
+    status.textContent = '正在准备剧情…';
+    status.className = 'status-line';
+    await ctx.applySettings({ storyTheater: collect().storyTheater });
+    const result = await ctx.startStory();
+    if (result && result.ok) {
+      status.textContent = `已开演：${result.topic}`;
+      status.className = 'status-line ok';
+    } else {
+      status.textContent = `开演失败：${(result && result.error) || '未知原因'}`;
+      status.className = 'status-line error';
+    }
+  });
+
+  $('#stopStoryBtn').addEventListener('click', () => {
+    const status = $('#storyStatus');
+    ctx.stopStory();
+    status.textContent = '已结束当前剧情';
+    status.className = 'status-line ok';
+  });
+
+  $('#startDrawBtn').addEventListener('click', async () => {
+    const status = $('#drawStatus');
+    status.textContent = '正在铺画纸…';
+    status.className = 'status-line';
+    await ctx.applySettings({ drawGuess: collect().drawGuess });
+    const result = await ctx.startDrawGuess();
+    if (result && result.ok) {
+      status.textContent = `已开画：共 ${result.rounds} 题`;
+      status.className = 'status-line ok';
+    } else {
+      status.textContent = `开局失败：${(result && result.error) || '未知原因'}`;
+      status.className = 'status-line error';
+    }
+  });
+
+  $('#stopDrawBtn').addEventListener('click', () => {
+    const status = $('#drawStatus');
+    ctx.stopDrawGuess();
+    status.textContent = '已结束当前这局';
+    status.className = 'status-line ok';
+  });
+
+  // 观众开画 / 收场时同步面板状态，避免按钮显示与实际进度脱节
+  let drawWasLive = null;
+  function syncDrawStatus() {
+    const draw = ctx.getDrawGuessState ? ctx.getDrawGuessState() : null;
+    if (!draw) return;
+    const status = $('#drawStatus');
+    if (!status) return;
+    if (draw.active) {
+      status.textContent = `进行中：第 ${draw.round}/${draw.maxRounds} 题`;
+      status.className = 'status-line ok';
+    } else if (drawWasLive === true) {
+      status.textContent = '本局已结束';
+      status.className = 'status-line ok';
+    }
+    drawWasLive = Boolean(draw.active);
+  }
+  syncDrawStatus();
+  setInterval(syncDrawStatus, 2000);
+
+  // 自动开演状态：每 5 秒刷新倒计时和暂缓原因，让主播知道为什么还没开演
+  function renderStoryAutoStatus() {
+    const el = node('storyAutoStatus');
+    if (!el || !ctx.getStoryAutoStatus) return;
+    const info = ctx.getStoryAutoStatus() || {};
+    el.textContent = info.text || '';
+    el.className = `status-line ${info.state === 'paused' ? 'warn' : info.state === 'ready' ? 'ok' : 'muted'}`;
+  }
+  renderStoryAutoStatus();
+  setInterval(renderStoryAutoStatus, 5000);
+
+  // 剧场状态同步：观众弹幕「结束剧场」或自然演完时，面板状态要跟着落到“已结束”
+  let storyWasLive = null;
+  function syncStoryStatus() {
+    const story = ctx.getStoryState ? ctx.getStoryState() : null;
+    if (!story) return;
+    const live = Boolean(story.active);
+    if (storyWasLive === true && !live) {
+      const status = $('#storyStatus');
+      if (status) {
+        status.textContent = `已结束：${story.topic || '当前剧场'}`;
+        status.className = 'status-line ok';
+      }
+    }
+    storyWasLive = live;
+  }
+  syncStoryStatus();
+  setInterval(syncStoryStatus, 2000);
+
   $('#openBoardBtn').addEventListener('click', () => {
     const url = syncBoardUrl();
     const opened = window.open(url, '_blank', 'noopener');
@@ -535,7 +737,10 @@ export function initSettingsView(ctx) {
     try {
       const result = await ctx.testTts(collect().tts);
       if (result && result.ok) {
-        const engine = result.provider === 'browser' ? '浏览器机械音' : 'MiniMax';
+        const engine =
+          result.provider === 'browser'
+            ? '浏览器机械音'
+            : (TTS_PROVIDERS[result.provider] && TTS_PROVIDERS[result.provider].label) || 'MiniMax';
         status.textContent = `播放中…（${engine}${result.mode ? ` · ${result.mode}` : ''}）`;
         status.className = 'status-line ok';
       } else {

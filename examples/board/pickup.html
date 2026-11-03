@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>系统拾音器 · 抖音直播助手</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: radial-gradient(1200px 600px at 50% -10%, #1b2b52 0%, #0b1220 60%, #070b14 100%);
+    color: #e6edf7;
+    font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  }
+  .card {
+    width: min(560px, 92vw);
+    padding: 28px 28px 22px;
+    border-radius: 22px;
+    border: 1px solid rgba(96, 165, 250, 0.28);
+    background: rgba(14, 23, 42, 0.82);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(10px);
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; letter-spacing: 0.02em; }
+  .sub { margin: 0 0 18px; font-size: 13px; color: #8fa6c8; line-height: 1.7; }
+  .sub code { color: #93c5fd; }
+  canvas { width: 100%; height: 96px; display: block; border-radius: 14px; background: rgba(9, 16, 30, 0.9); }
+  .row { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
+  button {
+    padding: 10px 22px;
+    border: 0;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #2b7de9, #60a5fa);
+    color: #fff;
+    font-size: 15px;
+    cursor: pointer;
+    transition: filter 0.2s;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.stop { background: linear-gradient(135deg, #b91c1c, #ef4444); }
+  .state { font-size: 13px; color: #8fa6c8; }
+  .state.on { color: #4ade80; }
+  .state.error { color: #f87171; }
+  .tips { margin: 18px 0 0; padding: 12px 14px; border-radius: 12px; background: rgba(59, 130, 246, 0.08); font-size: 12.5px; color: #9fb3d1; line-height: 1.8; }
+  .tips b { color: #cfe0f7; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>系统拾音器</h1>
+  <p class="sub">在普通浏览器里采集系统声音（音乐播放器 / 网页音乐），把电平实时推给背景板。<br />
+    OBS 浏览器源无法弹出授权窗口，所以要在浏览器打开本页：<code>http://127.0.0.1:8787/pickup</code></p>
+  <canvas id="bars"></canvas>
+  <div class="row">
+    <button type="button" id="toggle">开始拾音</button>
+    <span class="state" id="state">未开始</span>
+  </div>
+  <p class="tips">
+    <b>使用步骤</b><br />
+    1. 点「开始拾音」，在弹窗里选<b>整个屏幕</b>并勾选<b>「分享系统音频」</b>。<br />
+    2. 保持本页开着（可以最小化到后台），背景板会自动显示音乐律动。<br />
+    3. 拾音停止后约 1.5 秒，背景板会退回待机光条。
+  </p>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('bars');
+  const toggle = document.getElementById('toggle');
+  const stateLabel = document.getElementById('state');
+  const BAR_COUNT = 32;
+  const levels = new Array(BAR_COUNT).fill(0);
+  const ctx2d = canvas.getContext('2d');
+  let stream = null;
+  let audioCtx = null;
+  let workletNode = null;
+  let scriptNode = null;
+  let lastPostAt = 0;
+
+  /**
+   * 32 段电平：用 Goertzel 逐段算能量。
+   * 这段函数会被 toString() 塞进 AudioWorklet，内部不能引用外部变量。
+   */
+  function bandLevels(samples, sampleRate) {
+    const BANDS = 32;
+    const out = new Float32Array(BANDS);
+    const n = samples.length;
+    const lowHz = 90;
+    const highHz = Math.min(7000, sampleRate / 2 - 500);
+    for (let band = 0; band < BANDS; band += 1) {
+      const freq = lowHz * Math.pow(highHz / lowHz, band / (BANDS - 1));
+      const k = Math.max(1, Math.round((n * freq) / sampleRate));
+      const omega = (2 * Math.PI * k) / n;
+      const coeff = 2 * Math.cos(omega);
+      let s1 = 0;
+      let s2 = 0;
+      for (let i = 0; i < n; i += 1) {
+        const s0 = samples[i] + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+      }
+      const power = Math.max(0, s1 * s1 + s2 * s2 - coeff * s1 * s2);
+      const amplitude = Math.sqrt(power) / (n / 2);
+      out[band] = Math.min(1, Math.pow(amplitude * 8, 0.85));
+    }
+    return out;
+  }
+
+  /** 音频线程里的处理器：攒满 2048 个采样就发一次电平，后台标签页也会持续运行。 */
+  function workletSource() {
+    return `${bandLevels.toString()}
+class PickupLevelProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Float32Array(2048);
+    this.pos = 0;
+  }
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (!channel) return true;
+    for (let i = 0; i < channel.length; i += 1) {
+      this.buf[this.pos] = channel[i];
+      this.pos += 1;
+      if (this.pos < this.buf.length) continue;
+      this.port.postMessage(Array.from(bandLevels(this.buf, sampleRate)));
+      this.pos = 0;
+    }
+    return true;
+  }
+}
+registerProcessor('pickup-levels', PickupLevelProcessor);`;
+  }
+
+  function setState(text, kind = '') {
+    stateLabel.textContent = text;
+    stateLabel.className = `state${kind ? ` ${kind}` : ''}`;
+  }
+
+  function resize() {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
+  }
+
+  function draw() {
+    const width = canvas.width;
+    const height = canvas.height;
+    ctx2d.clearRect(0, 0, width, height);
+    const gap = Math.max(2, width * 0.004);
+    const barWidth = Math.max(1, (width - gap * (BAR_COUNT - 1)) / BAR_COUNT);
+    const baseline = height - 1;
+    for (let i = 0; i < BAR_COUNT; i += 1) {
+      const level = levels[i] || 0;
+      const barHeight = Math.max(1.5, level * (baseline - 2));
+      const x = i * (barWidth + gap);
+      ctx2d.fillStyle = i < BAR_COUNT / 2 ? 'rgba(43, 125, 233, 0.95)' : 'rgba(96, 165, 250, 0.95)';
+      ctx2d.fillRect(x, baseline - barHeight, barWidth, barHeight);
+    }
+  }
+
+  /** 把一帧电平推给背景板；约 60ms 节流，够扫出律动又不刷爆桥接 */
+  function pushLevels() {
+    const now = performance.now();
+    if (now - lastPostAt < 60) return;
+    lastPostAt = now;
+    fetch('/api/pickup/levels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ levels: levels.map((value) => Math.round(value * 1000) / 1000) }),
+    }).catch(() => {});
+  }
+
+  /** 电平由音频线程推送过来，不依赖 requestAnimationFrame，页面隐藏也照常上报 */
+  function handleLevels(next) {
+    for (let i = 0; i < BAR_COUNT; i += 1) {
+      const value = Math.min(1, Math.max(0, Number(next[i]) || 0));
+      levels[i] = value > levels[i] ? value : levels[i] * 0.82 + value * 0.18;
+    }
+    pushLevels();
+    if (document.visibilityState === 'visible') draw();
+  }
+
+  function tick() {
+    requestAnimationFrame(tick);
+    if (document.visibilityState === 'visible') draw();
+  }
+
+  /** 优先 AudioWorklet；不支持时退回 ScriptProcessor，二者都由音频回调驱动 */
+  async function attachAnalyser(ctx, source, sink) {
+    if (ctx.audioWorklet && typeof AudioWorkletNode === 'function') {
+      try {
+        const url = URL.createObjectURL(new Blob([workletSource()], { type: 'application/javascript' }));
+        await ctx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        const node = new AudioWorkletNode(ctx, 'pickup-levels', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        });
+        node.port.onmessage = (event) => {
+          if (Array.isArray(event.data)) handleLevels(event.data);
+        };
+        source.connect(node);
+        node.connect(sink);
+        workletNode = node;
+        return;
+      } catch {
+        /* 落到 ScriptProcessor 兜底 */
+      }
+    }
+    const node = ctx.createScriptProcessor(2048, 1, 1);
+    node.onaudioprocess = (event) => {
+      const data = event.inputBuffer.getChannelData(0);
+      handleLevels(bandLevels(data, ctx.sampleRate));
+    };
+    source.connect(node);
+    node.connect(sink);
+    scriptNode = node;
+  }
+
+  async function start() {
+    if (stream) {
+      stop();
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      setState('当前浏览器不支持系统音频采集', 'error');
+      return;
+    }
+    setState('请选择整个屏幕并勾选「分享系统音频」…');
+    try {
+      const nextStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 5 },
+        audio: {
+          suppressLocalAudioPlayback: false,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+        systemAudio: 'include',
+        selfBrowserSurface: 'exclude',
+        surfaceSwitching: 'exclude',
+      });
+      const audioTracks = nextStream.getAudioTracks();
+      if (!audioTracks.length) {
+        nextStream.getTracks().forEach((track) => track.stop());
+        setState('没有勾选「分享系统音频」，请重试', 'error');
+        return;
+      }
+      nextStream.getVideoTracks().forEach((track) => track.stop());
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      if (!Ctor) throw new Error('AudioContext unavailable');
+      const nextCtx = new Ctor();
+      if (nextCtx.state === 'suspended') await nextCtx.resume();
+      const source = nextCtx.createMediaStreamSource(nextStream);
+      // 静音输出让音频图持续运行：采集音频的标签页不会被后台冻结
+      const sink = nextCtx.createGain();
+      sink.gain.value = 0;
+      sink.connect(nextCtx.destination);
+      await attachAnalyser(nextCtx, source, sink);
+      stream = nextStream;
+      audioCtx = nextCtx;
+      toggle.textContent = '停止拾音';
+      toggle.classList.add('stop');
+      setState('拾音中 · 已推给背景板（可最小化）', 'on');
+      audioTracks[0].addEventListener('ended', stop);
+    } catch (error) {
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+      stream = null;
+      setState(error && error.name === 'NotAllowedError' ? '已取消共享 · 点击重试' : '拾音失败 · 点击重试', 'error');
+    }
+  }
+
+  function stop() {
+    if (workletNode) {
+      workletNode.port.onmessage = null;
+      workletNode.disconnect();
+      workletNode = null;
+    }
+    if (scriptNode) {
+      scriptNode.onaudioprocess = null;
+      scriptNode.disconnect();
+      scriptNode = null;
+    }
+    if (stream) stream.getTracks().forEach((track) => track.stop());
+    if (audioCtx) audioCtx.close().catch(() => {});
+    stream = null;
+    audioCtx = null;
+    levels.fill(0);
+    draw();
+    toggle.textContent = '开始拾音';
+    toggle.classList.remove('stop');
+    setState('已停止', '');
+  }
+
+  // 部分浏览器的 AudioContext 在标签页切回前台后可能被挂起，补一次恢复
+  document.addEventListener('visibilitychange', () => {
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    if (document.visibilityState === 'visible') draw();
+  });
+
+  window.addEventListener('resize', resize);
+  toggle.addEventListener('click', start);
+  resize();
+  draw();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

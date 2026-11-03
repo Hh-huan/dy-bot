@@ -157,6 +157,17 @@ body {
   transform-origin: 50% 100%;
 }
 
+/* 包一层缩放壳：桌宠动画自带 transform，缩放放外层才不会互相覆盖 */
+.pet-scale {
+  position: relative;
+  width: 168px;
+  height: 168px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
 @keyframes float {
   0%,
   100% {
@@ -571,4 +582,45 @@ body {
   .chat {
     height: 190px;
   }
+}
+
+/* 嵌入背景板（?embed=1）：只留透明舞台上的桌宠和气泡，去掉独立窗口的面板与操作条 */
+html.embed {
+  /* 关掉深色 color-scheme，否则 iframe 画布会被浏览器涂成黑底 */
+  color-scheme: light;
+  background: transparent;
+}
+
+html.embed body {
+  background: transparent;
+}
+
+html.embed .pet-app {
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  backdrop-filter: none;
+}
+
+html.embed .pet-top,
+html.embed .chat,
+html.embed .pet-controls {
+  display: none;
+}
+
+html.embed .pet-stage {
+  min-height: 0;
+  padding-bottom: 0;
+}
+
+html.embed .pet-scale {
+  transform: scale(var(--pet-scale, 1.3));
+  transform-origin: 50% 100%;
+}
+
+/* 背景板已经有弹幕/礼物区，桌宠只保留本体动画，不再弹气泡 */
+html.embed .bubble {
+  display: none;
 }

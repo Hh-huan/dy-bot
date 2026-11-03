@@ -1,6 +1,6 @@
 {
   "name": "dy-live-companion",
-  "version": "1.16.85",
+  "version": "1.16.137",
   "private": true,
   "type": "module",
   "description": "主播版：读取你自己抖音直播间的评论与弹幕，按规则 / AI 自动回复，可接桌宠、背景板与点歌（MV3，零依赖）",
@@ -8,10 +8,12 @@
     "test": "node --test \"test/*.test.mjs\"",
     "check": "node --check extension/app/main.js && node --check extension/content/bridge.js && node --check extension/content/inject.js && node --check extension/background.js",
     "bridge": "node bridge/server.mjs",
-    "pet": "node bridge/server.mjs"
+    "pet": "node bridge/server.mjs",
+    "obs:fit": "node tools/obs-fit.mjs"
   },
   "engines": {
     "node": ">=20"
   }
 }
+
 

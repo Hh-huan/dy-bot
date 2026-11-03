@@ -12,7 +12,7 @@
         <div class="brand">
           <div class="logo" aria-hidden="true">DY</div>
           <div class="brand-text">
-            <h1>直播弹幕助手 <span id="appVersion" class="version-chip">v1.16.85</span></h1>
+            <h1>直播弹幕助手 <span id="appVersion" class="version-chip">v1.16.137</span></h1>
             <p id="roomLabel" title="">等待直播间…</p>
           </div>
         </div>
@@ -339,22 +339,35 @@
             </div>
 
             <div class="settings-group">
-              <h2>语音朗读 <span class="tag">MiniMax TTS</span></h2>
+              <h2>语音朗读 <span class="tag">MiniMax / MiMo TTS</span></h2>
               <p class="muted">
-                AI 回复会调用 MiniMax 合成语音；默认音色「幼小可爱 · Cute Spirit」，语速与音调由插件内置。
-                API Key 留空时自动使用 AI 备用服务里的 MiniMax Key。
+                AI 回复会调用云端 TTS 合成语音。MiniMax 默认音色「幼小可爱 · Cute Spirit」；
+                MiMo 默认音色「冰糖」，可用风格指令控制语气与语速；切到「音色设计」模型后，
+                改为用一段文字描述你想听的音色（如「低沉磁性男声，语速偏慢」），不用选预置音色。
               </p>
               <label class="check-row slim">
                 <input type="checkbox" id="setDshPetTts" />
                 <span>启用语音朗读（AI 回复）</span>
               </label>
               <label class="field">
+                <span>服务商</span>
+                <select id="setTtsProvider"></select>
+              </label>
+              <label class="field" id="ttsMimoModelField" hidden>
+                <span>MiMo 模型</span>
+                <select id="setTtsMimoModel"></select>
+              </label>
+              <label class="field" id="ttsVoiceField">
                 <span>音色</span>
                 <select id="setTtsVoice"></select>
               </label>
               <label class="field" id="ttsCustomVoiceField" hidden>
                 <span>自定义 voice_id</span>
                 <input type="text" id="setTtsVoiceCustom" placeholder="Chinese (Mandarin)_Cute_Spirit" />
+              </label>
+              <label class="field" id="ttsStyleField">
+                <span id="ttsStyleLabel">风格指令（可选，仅 MiMo）</span>
+                <input type="text" id="setTtsStyle" placeholder="活泼甜美，语速稍快，句尾带点上扬" />
               </label>
               <div class="button-row">
                 <button type="button" class="ghost-btn" id="testTtsBtn">测试语音</button>
@@ -363,7 +376,7 @@
               <details class="advanced">
                 <summary>高级（API Key）</summary>
                 <label class="field">
-                  <span>API Key（留空自动复用备用 Key）</span>
+                  <span>API Key（MiniMax 留空可复用备用 Key；MiMo 需填写）</span>
                   <input type="password" id="setTtsKey" placeholder="留空即可" />
                 </label>
               </details>
@@ -372,7 +385,7 @@
             <div class="settings-group">
               <h2>暖场发言 <span class="tag">自动</span></h2>
               <p class="muted">
-                直播间安静或人少时，让 AI 说一句暖场话：可以发到直播间公屏、显示在桌宠气泡，并用 MiniMax 语音念出来。
+                直播间安静或人少时，让 AI 说一句暖场话：可以发到直播间公屏、显示在桌宠气泡，并用云端 TTS 语音念出来。
               </p>
               <label class="check-row slim">
                 <input type="checkbox" id="setWarmupEnabled" />
@@ -463,6 +476,63 @@
                 <button type="button" class="ghost-btn" id="copyBoardBtn">复制 OBS 地址</button>
                 <button type="button" class="ghost-btn" id="clearGiftStatsBtn">清空礼物统计</button>
                 <span id="boardStatus" class="status-line"></span>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <h2>互动剧场 <span class="tag">AI</span></h2>
+              <p class="muted">
+                到点自动开演一场 4～6 幕的互动短剧（每场幕数随机）：桌宠念旁白，观众发「A」「B」「C」「D」或「1」～「4」投票决定剧情走向，演到最后一幕自动收尾。观众也可以发「剧场大肥鱼失去尾巴」这类点播口令，随时开一场指定主题的短剧，主角由主题决定，不一定是鲸鱼娘。剧情面板显示在背景板左侧；打开背景板即可演出，连接桌宠后会额外配上动作和语音。需要先配置 AI 接口。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setStoryEnabled" />
+                <span>启用互动剧场自动开演</span>
+              </label>
+              <label class="field">
+                <span>指定剧场（留空随机）</span>
+                <input type="text" id="setStoryTopic" maxlength="30" placeholder="例如：大肥鱼失去尾巴" />
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>自动开演间隔（分钟）</span>
+                  <input type="number" id="setStoryInterval" min="20" max="240" step="10" placeholder="90" />
+                </label>
+              </div>
+              <label class="field">
+                <span>额外要求（可留空）</span>
+                <textarea id="setStoryPrompt" rows="2" placeholder="例如：多讲点海底的趣事，少提直播数据"></textarea>
+              </label>
+              <div class="button-row">
+                <button type="button" class="ghost-btn" id="startStoryBtn">现在开演一场</button>
+                <button type="button" class="ghost-btn" id="stopStoryBtn">结束当前剧情</button>
+                <span id="storyStatus" class="status-line"></span>
+              </div>
+              <p id="storyAutoStatus" class="status-line muted"></p>
+            </div>
+
+            <div class="settings-group">
+              <h2>你画我猜 <span class="tag">互动</span></h2>
+              <p class="muted">
+                桌宠在背景板画板上逐笔画出内置简笔画，画完后观众发弹幕猜答案；每题第一个猜中的观众获得积分，积分榜按自然日累计、跨场保留。观众发「你画我猜」开一局，猜词途中发「提示」或「下一题」，发「结束画画」提前收场。不需要 AI，不消耗 token；与互动剧场不能同时进行。
+              </p>
+              <label class="check-row slim">
+                <input type="checkbox" id="setDrawEnabled" />
+                <span>允许观众用弹幕开局</span>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>每题猜词时间（秒）</span>
+                  <input type="number" id="setDrawRoundSec" min="30" max="120" step="5" placeholder="60" />
+                </label>
+                <label class="field">
+                  <span>每场题数</span>
+                  <input type="number" id="setDrawRounds" min="3" max="10" step="1" placeholder="5" />
+                </label>
+              </div>
+              <div class="button-row">
+                <button type="button" class="ghost-btn" id="startDrawBtn">开始一局</button>
+                <button type="button" class="ghost-btn" id="stopDrawBtn">结束当前局</button>
+                <span id="drawStatus" class="status-line"></span>
               </div>
             </div>
 
@@ -650,7 +720,7 @@
             桌宠动作口令：单个动作发「跳舞」「转圈」「token来」这类短句即可；组合连招发
             「谢礼三连」「鲸鱼秀」「暴走三连」「撒娇三连」「打工三连」「拜年」，桌宠会连续表演三段动画。
             暖场说到「token来，token来！」时，桌宠也会自动播放 token 向胸口汇聚的动画；
-            发「token回」「回token」「token回来」这类口令，桌宠会回「token来！token来！」并播放同一动作。
+            发「token回」「回token」「token回来」这类口令，桌宠会回「token来，token来」并播放同一动作。
           </p>
           <p class="muted">
             原理：扩展在页面内旁路监听抖音自身的弹幕 WebSocket（只读），本地解析 protobuf；

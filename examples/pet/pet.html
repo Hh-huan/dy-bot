@@ -4,7 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>桌宠 · 抖音直播助手</title>
-    <link rel="stylesheet" href="pet.css" />
+    <!-- 嵌进背景板时（?embed=1）先切到透明舞台模式，避免 iframe 里闪一帧深色面板 -->
+    <script>
+      if (new URLSearchParams(location.search).get('embed') === '1') {
+        document.documentElement.classList.add('embed');
+      }
+    </script>
+    <link rel="stylesheet" href="pet.css?v=1.16.115" />
   </head>
   <body>
     <div class="pet-app">
@@ -18,25 +24,27 @@
 
       <section class="pet-stage">
         <div class="bubble" id="bubble" hidden></div>
-        <div class="pet" id="pet">
-          <div class="ear left"></div>
-          <div class="ear right"></div>
-          <div class="head">
-            <div class="face">
-              <span class="eye left"></span>
-              <span class="eye right"></span>
-              <span class="mouth"></span>
-              <span class="cheek left"></span>
-              <span class="cheek right"></span>
+        <div class="pet-scale">
+          <div class="pet" id="pet">
+            <div class="ear left"></div>
+            <div class="ear right"></div>
+            <div class="head">
+              <div class="face">
+                <span class="eye left"></span>
+                <span class="eye right"></span>
+                <span class="mouth"></span>
+                <span class="cheek left"></span>
+                <span class="cheek right"></span>
+              </div>
             </div>
+            <div class="body"><div class="belly"></div></div>
+            <div class="arm left"></div>
+            <div class="arm right"></div>
+            <div class="foot left"></div>
+            <div class="foot right"></div>
           </div>
-          <div class="body"><div class="belly"></div></div>
-          <div class="arm left"></div>
-          <div class="arm right"></div>
-          <div class="foot left"></div>
-          <div class="foot right"></div>
+          <div class="shadow"></div>
         </div>
-        <div class="shadow"></div>
       </section>
 
       <section class="chat" id="chatPanel">
@@ -59,6 +67,6 @@
       </footer>
     </div>
 
-    <script src="pet.js"></script>
+    <script src="pet.js?v=1.16.115"></script>
   </body>
 </html>

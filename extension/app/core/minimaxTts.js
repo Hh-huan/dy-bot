@@ -1,4 +1,9 @@
-/** MiniMax TTS：把 AI 回复合成成语音在主播电脑上播放。 */
+/** TTS：把 AI 回复合成成语音在主播电脑上播放，支持 MiniMax 与 MiMo（小米）两家。 */
+
+export const TTS_PROVIDERS = {
+  minimax: { label: 'MiniMax', baseUrl: 'https://api.minimax.cn/v1', model: 'speech-2.8-hd' },
+  mimo: { label: 'MiMo（小米）', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.5-tts' },
+};
 
 export const TTS_VOICES = [
   { id: 'Chinese (Mandarin)_Cute_Spirit', label: '幼小可爱 · Cute Spirit（推荐）' },
@@ -11,7 +16,49 @@ export const TTS_VOICES = [
   { id: 'Cantonese_CuteGirl', label: '粤语可爱女孩 · Cute Girl' },
 ];
 
+/** MiMo 内置音色，voice 字段直接填英文 id 或中文名。 */
+export const MIMO_VOICES = [
+  { id: 'mimo_default', label: '默认音色 · mimo_default' },
+  { id: '冰糖', label: '冰糖 · 中文女声（推荐）' },
+  { id: '茉莉', label: '茉莉 · 中文女声' },
+  { id: '苏打', label: '苏打 · 中文男声' },
+  { id: '白桦', label: '白桦 · 中文男声' },
+  { id: 'Mia', label: 'Mia · 英文女声' },
+  { id: 'Chloe', label: 'Chloe · 英文女声' },
+  { id: 'Milo', label: 'Milo · 英文男声' },
+  { id: 'Dean', label: 'Dean · 英文男声' },
+];
+
+/** MiMo 可选模型：预置音色合成，或用文字描述即时设计音色。 */
+export const MIMO_MODELS = [
+  { id: 'mimo-v2.5-tts', label: '预置音色 · mimo-v2.5-tts' },
+  { id: 'mimo-v2.5-tts-voicedesign', label: '音色设计 · mimo-v2.5-tts-voicedesign' },
+];
+
 export const DEFAULT_TTS_VOICE = 'Chinese (Mandarin)_Cute_Spirit';
+export const DEFAULT_MIMO_VOICE = '冰糖';
+export const DEFAULT_MIMO_MODEL = 'mimo-v2.5-tts';
+export const VOICE_DESIGN_MODEL = 'mimo-v2.5-tts-voicedesign';
+/** 音色设计模型没填描述时的兜底文案，保证能出声。 */
+export const DEFAULT_VOICE_DESIGN = '年轻甜美的中文女声，语速稍快，语气活泼亲切';
+
+/** 当前使用的语音服务商；未知值一律按 MiniMax 处理。 */
+export function ttsProvider(settings) {
+  const provider = String(((settings && settings.tts) || {}).provider || '').toLowerCase();
+  return provider === 'mimo' ? 'mimo' : 'minimax';
+}
+
+/** 当前使用的 MiMo 模型；未知值回落到预置音色模型。 */
+export function mimoModel(settings) {
+  const saved = String(((settings && settings.tts) || {}).mimoModel || '').trim();
+  return MIMO_MODELS.some((item) => item.id === saved) ? saved : DEFAULT_MIMO_MODEL;
+}
+
+/** 是否使用音色设计模型（该模型不支持 audio.voice，靠 user 消息描述音色）。 */
+export function isVoiceDesign(settings) {
+  return mimoModel(settings) === VOICE_DESIGN_MODEL;
+}
+
 
 let currentRequest = null;
 let currentAudio = null;
@@ -55,21 +102,44 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
-/** TTS Key 留空时，自动复用 AI 备用服务（MiniMax）的 Key。 */
+/** 服务商默认地址；配置里存的是另一家的默认地址时忽略，避免切换后打到错误域名。 */
+function baseUrlFor(provider, saved) {
+  const value = trimSlash(saved || '');
+  if (!value) return TTS_PROVIDERS[provider].baseUrl;
+  const others = Object.entries(TTS_PROVIDERS).filter(([key]) => key !== provider);
+  if (others.some(([, config]) => config.baseUrl === value)) return TTS_PROVIDERS[provider].baseUrl;
+  return value;
+}
+
+/** TTS Key：MiMo 不复用 MiniMax 的 Key（两家平台互不通），其余沿用原逻辑。 */
 export function resolveTtsKey(settings) {
   const tts = (settings && settings.tts) || {};
   const ai = (settings && settings.ai) || {};
+  const provider = ttsProvider(settings);
+  const own = String(tts.apiKey || '').trim();
+  if (own) return own;
+  if (provider === 'mimo') {
+    return String(ai.provider || '').toLowerCase().startsWith('mimo') ? String(ai.apiKey || '').trim() : '';
+  }
   const fallbackKey = (ai.fallback && ai.fallback.apiKey) || '';
   const primaryKey = String(ai.provider || '').startsWith('minimax') ? ai.apiKey : '';
-  return String(tts.apiKey || fallbackKey || primaryKey || '').trim();
+  return String(fallbackKey || primaryKey || '').trim();
 }
 
 export function ttsConfig(settings) {
   const tts = (settings && settings.tts) || {};
+  const provider = ttsProvider(settings);
+  const model = provider === 'mimo' ? mimoModel(settings) : tts.model || TTS_PROVIDERS.minimax.model;
+  const voiceDesign = provider === 'mimo' && model === VOICE_DESIGN_MODEL;
   return {
-    baseUrl: trimSlash(tts.baseUrl || 'https://api.minimax.cn/v1'),
-    model: tts.model || 'speech-2.8-hd',
-    voiceId: tts.voiceId || DEFAULT_TTS_VOICE,
+    provider,
+    baseUrl: baseUrlFor(provider, tts.baseUrl),
+    model,
+    voiceDesign,
+    voiceId: provider === 'mimo'
+      ? (voiceDesign ? '' : tts.mimoVoice || DEFAULT_MIMO_VOICE)
+      : tts.voiceId || DEFAULT_TTS_VOICE,
+    style: String(tts.mimoStyle || '').trim() || (voiceDesign ? DEFAULT_VOICE_DESIGN : ''),
     speed: clampNumber(tts.speed, 0.5, 2, 1),
     vol: clampNumber(tts.vol, 0.1, 10, 1),
     pitch: Math.round(clampNumber(tts.pitch, -12, 12, 2)),
@@ -86,6 +156,18 @@ export function hexToBytes(hex) {
   for (let i = 0; i < bytes.length; i += 1) {
     bytes[i] = parseInt(text.slice(i * 2, i * 2 + 2), 16);
   }
+  return bytes;
+}
+
+/** MiMo 返回 base64 音频（可能带 data: 前缀），转成字节数组。 */
+export function base64ToBytes(text) {
+  const raw = String(text || '')
+    .replace(/^data:[^,]*,/, '')
+    .replace(/\s+/g, '');
+  if (!raw) throw new Error('TTS 返回空音频');
+  const binary = atob(raw);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 
@@ -163,7 +245,81 @@ export async function synthesizeMinimax(text, settings, options = {}) {
   }
 }
 
-export function stopMiniMaxTts() {
+/**
+ * MiMo（小米）TTS：走 OpenAI 兼容的 chat/completions，文本必须放在 assistant 角色，
+ * 风格指令放在可选的 user 角色，返回 base64 音频。
+ * 音色设计模型（mimo-v2.5-tts-voicedesign）不支持 audio.voice，改由 user 消息描述音色。
+ * @returns {Promise<{audio:Uint8Array, mime:string, extra:object}>}
+ */
+export async function synthesizeMiMo(text, settings, options = {}) {
+  const content = String(text || '').trim();
+  if (!content) throw new Error('TTS 文本为空');
+  const key = resolveTtsKey(settings);
+  if (!key) throw new Error('未配置 MiMo TTS API Key');
+
+  const cfg = ttsConfig(settings);
+  const controller = new AbortController();
+  const outer = options.signal;
+  if (outer) {
+    if (outer.aborted) controller.abort();
+    else outer.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
+
+  const messages = [];
+  if (cfg.style) messages.push({ role: 'user', content: cfg.style });
+  messages.push({ role: 'assistant', content: content.slice(0, 1000) });
+  const audioParam = { format: 'wav' };
+  if (!cfg.voiceDesign) audioParam.voice = cfg.voiceId;
+
+  try {
+    const response = await fetch(`${cfg.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': key,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages,
+        audio: audioParam,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`MiMo TTS HTTP ${response.status}${detail ? `：${detail.slice(0, 160)}` : ''}`);
+    }
+
+    const data = await response.json();
+    if (data && data.error) {
+      throw new Error(`MiMo TTS 错误：${(data.error && data.error.message) || JSON.stringify(data.error).slice(0, 160)}`);
+    }
+    const message = data && data.choices && data.choices[0] ? data.choices[0].message : null;
+    const audio = base64ToBytes(message && message.audio ? message.audio.data : '');
+    return {
+      audio,
+      mime: 'audio/wav',
+      extra: (message && message.audio) || {},
+    };
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw new Error('MiMo TTS 请求超时或被取消');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 按当前服务商合成，供播放层与测试复用。 */
+export async function synthesizeTts(text, settings, options = {}) {
+  return ttsProvider(settings) === 'mimo'
+    ? synthesizeMiMo(text, settings, options)
+    : synthesizeMinimax(text, settings, options);
+}
+
+export function stopTts() {
   if (currentRequest) {
     try {
       currentRequest.abort();
@@ -225,7 +381,8 @@ export function speakBrowser(text, onEnded) {
       return false;
     }
     speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(String(text || '').slice(0, 120));
+    // 剧情台词可能较长（结局），浏览器兜底也要尽量念完整，不截成半句
+    const utterance = new SpeechSynthesisUtterance(String(text || '').slice(0, 600));
     utterance.lang = detectSpeechLang(text);
     utterance.rate = 1.05;
     utterance.pitch = 1.15;
@@ -305,14 +462,15 @@ async function playWithAudioElement(audio, mime, volume, onEnded) {
 }
 
 /**
- * 合成并播放。默认只使用 MiniMax 音频；只有显式 fallbackToBrowser 才回退机械音。
+ * 合成并播放。默认只使用云端音频；只有显式 fallbackToBrowser 才回退机械音。
  * 返回的 done Promise 在播放结束或被停止时 resolve，供上层语音队列排序。
- * @returns {Promise<{ok:boolean, provider:'minimax'|'browser', mode?:string, error?:string, done?:Promise<void>}>}
+ * @returns {Promise<{ok:boolean, provider:'minimax'|'mimo'|'browser', mode?:string, error?:string, done?:Promise<void>}>}
  */
-export async function speakMiniMax(text, settings, options = {}) {
+export async function speakTts(text, settings, options = {}) {
   const content = String(text || '').trim();
-  if (!content) return { ok: false, provider: 'minimax', error: '文本为空' };
-  stopMiniMaxTts();
+  const provider = ttsProvider(settings);
+  if (!content) return { ok: false, provider, error: '文本为空' };
+  stopTts();
 
   let settled = false;
   let resolveDone;
@@ -329,17 +487,25 @@ export async function speakMiniMax(text, settings, options = {}) {
   const controller = new AbortController();
   currentRequest = controller;
   try {
-    const { audio, mime } = await synthesizeMinimax(content, settings, {
+    const { audio, mime } = await synthesizeTts(content, settings, {
       signal: controller.signal,
       timeoutMs: options.timeoutMs,
     });
     if (controller.signal.aborted) throw new Error('TTS 已取消');
+    // 背景板也要出声：把合成好的音频交给上层转发，避免重复调用服务商
+    if (typeof options.onAudio === 'function') {
+      try {
+        options.onAudio(audio, mime);
+      } catch {
+        /* 转发失败不影响本机播放 */
+      }
+    }
 
     let webError = null;
     try {
       if (await playWithWebAudio(audio, options.volume, finish)) {
         if (currentRequest === controller) currentRequest = null;
-        return { ok: true, provider: 'minimax', mode: 'webaudio', done };
+        return { ok: true, provider, mode: 'webaudio', done };
       }
     } catch (error) {
       webError = error;
@@ -348,10 +514,10 @@ export async function speakMiniMax(text, settings, options = {}) {
     try {
       await playWithAudioElement(audio, mime, options.volume, finish);
       if (currentRequest === controller) currentRequest = null;
-      return { ok: true, provider: 'minimax', mode: 'audio', done };
+      return { ok: true, provider, mode: 'audio', done };
     } catch (error) {
       const detail = webError ? `${webError.message}；${error.message}` : error.message;
-      throw new Error(`MiniMax 音频播放失败：${detail}`);
+      throw new Error(`${TTS_PROVIDERS[provider].label} 音频播放失败：${detail}`);
     }
   } catch (error) {
     if (currentRequest === controller) currentRequest = null;

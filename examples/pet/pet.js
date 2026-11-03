@@ -14,6 +14,13 @@
   const replyInput = $('replyInput');
 
   let ttsEnabled = localStorage.getItem('dy-pet-tts') !== 'off';
+  // 嵌进背景板（?embed=1）时只画桌宠和气泡：缩放跟着 iframe 大小走，语音关掉避免和独立桌宠窗口重复出声
+  const embedded = document.documentElement.classList.contains('embed');
+  if (embedded) {
+    const scale = Math.min(1.8, Math.max(0.8, Number(new URLSearchParams(location.search).get('scale')) || 1.5));
+    document.documentElement.style.setProperty('--pet-scale', String(scale));
+    ttsEnabled = false;
+  }
   let chatVisible = localStorage.getItem('dy-pet-chat') !== 'off';
   let status = null;
   let bubbleTimer = 0;

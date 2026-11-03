@@ -66,9 +66,13 @@ export const SETTINGS_DEFAULTS = {
     likeThanks: true,
   },
   tts: {
+    provider: 'minimax',
     baseUrl: 'https://api.minimax.cn/v1',
     model: 'speech-2.8-hd',
     voiceId: 'Chinese (Mandarin)_Cute_Spirit',
+    mimoModel: 'mimo-v2.5-tts',
+    mimoVoice: '冰糖',
+    mimoStyle: '',
     speed: 1,
     pitch: 2,
     emotion: 'happy',
@@ -95,6 +99,17 @@ export const SETTINGS_DEFAULTS = {
     bridgeUrl: 'http://127.0.0.1:8787',
     petSlot: 'center',
     avatarBubbles: 10,
+  },
+  storyTheater: {
+    enabled: true,
+    autoIntervalMin: 90,
+    topic: '',
+    prompt: '',
+  },
+  drawGuess: {
+    enabled: true,
+    roundSec: 60,
+    maxRounds: 5,
   },
   songRequest: {
     enabled: false,
@@ -136,6 +151,57 @@ export function mergeSettings(input) {
     dshPet: { ...SETTINGS_DEFAULTS.dshPet, ...(saved.dshPet || {}) },
     tts: { ...SETTINGS_DEFAULTS.tts, ...(saved.tts || {}) },
     warmup: { ...SETTINGS_DEFAULTS.warmup, ...(saved.warmup || {}) },
+    storyTheater: {
+      ...SETTINGS_DEFAULTS.storyTheater,
+      ...(saved.storyTheater || {}),
+      // 自动开演间隔：20~240 分钟，缺省或非法值回到 90
+      autoIntervalMin: Math.round(
+        Math.min(
+          240,
+          Math.max(
+            20,
+            Number(
+              saved.storyTheater && saved.storyTheater.autoIntervalMin != null
+                ? saved.storyTheater.autoIntervalMin
+                : SETTINGS_DEFAULTS.storyTheater.autoIntervalMin,
+            ) || SETTINGS_DEFAULTS.storyTheater.autoIntervalMin,
+          ),
+        ),
+      ),
+      topic: String((saved.storyTheater && saved.storyTheater.topic) || '').trim().slice(0, 30),
+      prompt: String((saved.storyTheater && saved.storyTheater.prompt) || ''),
+    },
+    drawGuess: {
+      ...SETTINGS_DEFAULTS.drawGuess,
+      ...(saved.drawGuess || {}),
+      // 每题秒数 30~120，每场题数 3~10，非法值回到默认
+      roundSec: Math.round(
+        Math.min(
+          120,
+          Math.max(
+            30,
+            Number(
+              saved.drawGuess && saved.drawGuess.roundSec != null
+                ? saved.drawGuess.roundSec
+                : SETTINGS_DEFAULTS.drawGuess.roundSec,
+            ) || SETTINGS_DEFAULTS.drawGuess.roundSec,
+          ),
+        ),
+      ),
+      maxRounds: Math.round(
+        Math.min(
+          10,
+          Math.max(
+            3,
+            Number(
+              saved.drawGuess && saved.drawGuess.maxRounds != null
+                ? saved.drawGuess.maxRounds
+                : SETTINGS_DEFAULTS.drawGuess.maxRounds,
+            ) || SETTINGS_DEFAULTS.drawGuess.maxRounds,
+          ),
+        ),
+      ),
+    },
     board: {
       ...SETTINGS_DEFAULTS.board,
       ...(saved.board || {}),
